@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">audio-phone-speaker</string>
+    <string name="title_activity_main">audio-phone-speaker</string>
+    <string name="package_name">glauco.phone.audiospeaker</string>
+    <string name="custom_url_scheme">glauco.phone.audiospeaker</string>
+    <string name="background_audio_channel_name">Audio stream</string>
+    <string name="background_audio_notification_title">audio-phone-speaker ativo</string>
+    <string name="background_audio_notification_text">Recebendo audio em segundo plano</string>
+</resources>

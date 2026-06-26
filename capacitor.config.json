@@ -1,0 +1,18 @@
+{
+	"appId": "glauco.phone.audiospeaker",
+	"appName": "audio-phone-speaker",
+	"webDir": "dist",
+	"plugins": {
+		"SplashScreen": {
+			"launchAutoHide": true
+		}
+	},
+	"server": {
+		"scheme": "http",
+		"androidScheme": "http",
+		"cleartext": true,
+		"allowNavigation": [
+			"127.0.0.1"
+		]
+	}
+}

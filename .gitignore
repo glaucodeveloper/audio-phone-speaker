@@ -1,0 +1,15 @@
+.idea/
+node_modules/
+.vscode/
+*.map
+.DS_Store
+.sourcemaps
+dist/
+__pycache__/
+*.pyc
+audio-screen*.png
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties
