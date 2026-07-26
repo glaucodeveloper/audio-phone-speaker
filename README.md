@@ -1,6 +1,6 @@
 # audio-phone-speaker
 
-Android app + Python sender para tocar no celular o audio capturado do speaker/loopback do PC via `ws://127.0.0.1:5000`.
+Android app + Python sender para tocar no celular o audio capturado do speaker/loopback do PC via `ws://127.0.0.1:5001`.
 
 ## O que este projeto faz
 
@@ -72,7 +72,7 @@ Se quiser forcar manualmente no aparelho conectado:
 ```powershell
 adb shell dumpsys deviceidle whitelist +glauco.phone.audiospeaker
 adb shell dumpsys deviceidle whitelist
-adb reverse tcp:5000 tcp:5000
+adb reverse tcp:5001 tcp:5001
 ```
 
 ## Debug de streaming
@@ -94,3 +94,5 @@ Se `dropped` ou `underflows` piorarem, o sender tenta:
 - O endereco de conexao e fixo em `127.0.0.1`.
 - O fluxo depende de `adb reverse`, entao o servidor Python deve rodar no PC.
 - O sender usa loopback do speaker padrao via `soundcard`.
+
+Veja [Inicialização automática no Linux e Windows](docs/autostart.md).

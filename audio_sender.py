@@ -2,31 +2,39 @@ import asyncio
 import json
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
 import numpy as np
+
+# SoundCard 0.4.6 no Linux tenta ler sys.argv[1] durante o import.
+# Garanta um nome de programa quando o sender for iniciado sem argumentos.
+if len(sys.argv) < 2:
+    sys.argv.append("audio-phone-speaker")
+
 import soundcard as sc
 import websockets
 
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = 5001
 APP_ID = "glauco.phone.audiospeaker"
 PROJECT_DIR = Path(__file__).resolve().parent
 DEBUG_APK = PROJECT_DIR / "android" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
 DEVICE_POLL_SECONDS = 10
 APP_OPEN_COOLDOWN_SECONDS = 30
 PLAYBACK_RESYNC_COOLDOWN_SECONDS = 8
-DROPPED_CHUNKS_RESYNC_DELTA = 2
+PLAYBACK_NOTICE_COOLDOWN_SECONDS = 8
+DROPPED_CHUNKS_NOTICE_DELTA = 6
 
 SAMPLE_RATE = 48000
 CHANNELS = 2
-UNDERFLOW_FRAMES_RESYNC_DELTA = SAMPLE_RATE // 2
+UNDERFLOW_EVENTS_NOTICE_DELTA = 8
 
-# 960 = 20 ms em 48 kHz. Menos overhead que enviar blocos de 5 ms.
-BLOCK_FRAMES = 960
+# 480 = 10 ms em 48 kHz. Mantem baixa latencia e reduz oscilacao do buffer.
+BLOCK_FRAMES = 480
 
-QUEUE_MAX = 24
+QUEUE_MAX = 12
 last_open_attempt_by_device = {}
 
 
@@ -250,6 +258,7 @@ async def handler(websocket, path=None):
     stop_event = threading.Event()
     last_stats = None
     last_resync = 0
+    last_playback_notice = 0
 
     def push_frame(pcm: bytes):
         while queue.full():
@@ -300,7 +309,7 @@ async def handler(websocket, path=None):
             print("WebSocket close during resync failed:", repr(e))
 
     async def receive_stats():
-        nonlocal last_stats
+        nonlocal last_stats, last_playback_notice
 
         async for message in websocket:
             if not isinstance(message, str):
@@ -332,13 +341,18 @@ async def handler(websocket, path=None):
                 "underflows": underflows,
             }
 
-            if dropped_delta >= DROPPED_CHUNKS_RESYNC_DELTA:
-                await resync(f"dropped audio chunks increased by {dropped_delta}")
-                return
-
-            if underflow_delta >= UNDERFLOW_FRAMES_RESYNC_DELTA and buffered < BLOCK_FRAMES:
-                await resync(f"audio underflow increased by {underflow_delta} frames")
-                return
+            if (
+                dropped_delta >= DROPPED_CHUNKS_NOTICE_DELTA or
+                (underflow_delta >= UNDERFLOW_EVENTS_NOTICE_DELTA and buffered < BLOCK_FRAMES)
+            ):
+                now = asyncio.get_running_loop().time()
+                if now - last_playback_notice >= PLAYBACK_NOTICE_COOLDOWN_SECONDS:
+                    last_playback_notice = now
+                    print(
+                        "Playback instability notice: "
+                        f"dropped +{dropped_delta}, underflows +{underflow_delta}; "
+                        "keeping websocket open"
+                    )
 
     async def send_audio():
         while True:
