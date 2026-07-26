@@ -1,19 +1,20 @@
 // main.js
 // Cliente WebSocket PCM 16-bit LE stereo 48 kHz para Capacitor/WebView.
 // Para USB via ADB, rode no PC:
-//   adb reverse tcp:5000 tcp:5000
+//   adb reverse tcp:5001 tcp:5001
 // Depois conecte em:
-//   ws://127.0.0.1:5000
+//   ws://127.0.0.1:5001
 
-const WS_URL = "ws://127.0.0.1:5000";
+const WS_URL = "ws://127.0.0.1:5001";
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
 
-// 9600 frames = 200 ms em 48 kHz.
-// 24000 frames = 500 ms em 48 kHz.
-const TARGET_BUFFERED_FRAMES = 9600;
-const MAX_BUFFERED_FRAMES = 24000;
+// 2400 frames = 50 ms em 48 kHz.
+// 4800 frames = 100 ms em 48 kHz.
+const TARGET_BUFFERED_FRAMES = 2400;
+const MAX_BUFFERED_FRAMES = 4800;
+const START_BUFFERED_FRAMES = 2400;
 
 let audioContext = null;
 let workletNode = null;
@@ -33,6 +34,7 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     this.channels = options.processorOptions.channels || 2;
     this.targetBufferedFrames = options.processorOptions.targetBufferedFrames || 960;
     this.maxBufferedFrames = options.processorOptions.maxBufferedFrames || 2400;
+    this.startBufferedFrames = options.processorOptions.startBufferedFrames || 960;
 
     this.queue = [];
     this.readFrameOffset = 0;
@@ -41,8 +43,20 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     this.droppedChunks = 0;
     this.receivedChunks = 0;
     this.processedFrames = 0;
+    this.playbackStarted = false;
+    this.inUnderflow = false;
+    this.smoothedBufferedFrames = 0;
 
     this.port.onmessage = (event) => {
+      if (event.data && event.data.type === "reset") {
+        this.queue = [];
+        this.readFrameOffset = 0;
+        this.playbackStarted = false;
+        this.inUnderflow = false;
+        this.smoothedBufferedFrames = 0;
+        return;
+      }
+
       const arrayBuffer = event.data;
       if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
 
@@ -87,12 +101,18 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
 
   postStatsIfNeeded(renderedFrames) {
     this.processedFrames += renderedFrames;
-    if (this.processedFrames < sampleRate) return;
+    if (this.processedFrames < sampleRate / 2) return;
 
     this.processedFrames = 0;
+    const buffered = this.bufferedFrames();
+    this.smoothedBufferedFrames = this.smoothedBufferedFrames === 0
+      ? buffered
+      : Math.round((this.smoothedBufferedFrames * 0.7) + (buffered * 0.3));
+
     this.port.postMessage({
       type: "stats",
-      bufferedFrames: this.bufferedFrames(),
+      bufferedFrames: buffered,
+      displayBufferedFrames: this.smoothedBufferedFrames,
       droppedChunks: this.droppedChunks,
       underflows: this.underflows,
       receivedChunks: this.receivedChunks
@@ -103,15 +123,31 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     const output = outputs[0];
     const left = output[0];
     const right = output[1] || output[0];
+    const bufferedAtStart = this.bufferedFrames();
+
+    if (!this.playbackStarted) {
+      if (bufferedAtStart < this.startBufferedFrames) {
+        left.fill(0);
+        right.fill(0);
+        this.postStatsIfNeeded(left.length);
+        return true;
+      }
+      this.playbackStarted = true;
+    }
 
     for (let i = 0; i < left.length; i++) {
       if (this.queue.length === 0) {
         left[i] = 0;
         right[i] = 0;
-        this.underflows++;
+        if (this.playbackStarted && !this.inUnderflow) {
+          this.underflows++;
+          this.inUnderflow = true;
+          this.playbackStarted = false;
+        }
         continue;
       }
 
+      this.inUnderflow = false;
       const chunk = this.queue[0];
       const base = this.readFrameOffset * this.channels;
 
@@ -170,6 +206,16 @@ function sendPlaybackStats(msg) {
 		}));
 	} catch (err) {
 		console.warn("Playback stats send failed:", err);
+	}
+}
+
+function resetPlaybackBuffer() {
+	if (!workletNode) return;
+
+	try {
+		workletNode.port.postMessage({ type: "reset" });
+	} catch (err) {
+		console.warn("Playback reset failed:", err);
 	}
 }
 
@@ -265,7 +311,8 @@ async function createAudioGraph() {
 		processorOptions: {
 			channels: CHANNELS,
 			targetBufferedFrames: TARGET_BUFFERED_FRAMES,
-			maxBufferedFrames: MAX_BUFFERED_FRAMES
+			maxBufferedFrames: MAX_BUFFERED_FRAMES,
+			startBufferedFrames: START_BUFFERED_FRAMES
 		}
 	});
 
@@ -273,7 +320,8 @@ async function createAudioGraph() {
 		const msg = event.data;
 		if (!msg || msg.type !== "stats") return;
 
-		const ms = (msg.bufferedFrames * 1000 / SAMPLE_RATE).toFixed(1);
+		const displayFrames = msg.displayBufferedFrames ?? msg.bufferedFrames;
+		const ms = (displayFrames * 1000 / SAMPLE_RATE).toFixed(1);
 		setStats(
 			`buffer=${ms}ms dropped=${msg.droppedChunks} underflows=${msg.underflows}`
 		);
@@ -318,6 +366,7 @@ function connectWebSocket() {
 	websocket.onopen = () => {
 		reconnectAttempts = 0;
 		setStatus(`connected: ${WS_URL}`);
+		resetPlaybackBuffer();
 		ensureAudioContextRunning();
 	};
 
@@ -344,6 +393,7 @@ function connectWebSocket() {
 	websocket.onclose = () => {
 		if (userStopped) return;
 
+		resetPlaybackBuffer();
 		setStatus("websocket closed - reconnecting...");
 		scheduleReconnect();
 	};

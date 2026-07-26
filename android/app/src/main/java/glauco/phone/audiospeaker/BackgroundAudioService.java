@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -35,9 +36,30 @@ public class BackgroundAudioService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification());
+        Notification notification = buildNotification();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            );
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
         acquireWakeLock();
         return START_STICKY;
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Intent restartIntent = new Intent(getApplicationContext(), BackgroundAudioService.class);
+        restartIntent.setAction(ACTION_START);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getApplicationContext().startForegroundService(restartIntent);
+        } else {
+            getApplicationContext().startService(restartIntent);
+        }
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
@@ -69,8 +91,10 @@ public class BackgroundAudioService extends Service {
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build();
     }
 
@@ -107,7 +131,7 @@ public class BackgroundAudioService extends Service {
             "audio-phone-speaker:BackgroundAudio"
         );
         wakeLock.setReferenceCounted(false);
-        wakeLock.acquire(4 * 60 * 60 * 1000L);
+        wakeLock.acquire();
     }
 
     private void releaseWakeLock() {
