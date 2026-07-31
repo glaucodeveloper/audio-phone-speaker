@@ -21,10 +21,14 @@ let workletNode = null;
 let websocket = null;
 let started = false;
 let resumeTimer = null;
+let reconnectTimer = null;
 let backgroundKeepAliveEnabled = false;
 let userStopped = false;
 let reconnectAttempts = 0;
+let connectionToken = 0;
+
 const RECONNECT_BASE_DELAY = 1000;
+const RECONNECT_MAX_DELAY = 10000;
 
 const workletSource = `
 class PCMPlayerProcessor extends AudioWorkletProcessor {
@@ -188,9 +192,25 @@ function setStatus(text) {
 	console.log(text);
 }
 
+function setStatusDetail(text) {
+	const el = document.getElementById("status-detail");
+	if (el) el.textContent = text;
+}
+
 function setStats(text) {
 	const el = document.getElementById("stats");
 	if (el) el.textContent = text;
+}
+
+function setStatsDetail(text) {
+	const el = document.getElementById("stats-detail");
+	if (el) el.textContent = text;
+}
+
+function clearReconnectTimer() {
+	if (!reconnectTimer) return;
+	window.clearTimeout(reconnectTimer);
+	reconnectTimer = null;
 }
 
 function sendPlaybackStats(msg) {
@@ -322,8 +342,9 @@ async function createAudioGraph() {
 
 		const displayFrames = msg.displayBufferedFrames ?? msg.bufferedFrames;
 		const ms = (displayFrames * 1000 / SAMPLE_RATE).toFixed(1);
-		setStats(
-			`buffer=${ms}ms dropped=${msg.droppedChunks} underflows=${msg.underflows}`
+		setStats(`buffer=${ms}ms`);
+		setStatsDetail(
+			`drops=${msg.droppedChunks}  underflows=${msg.underflows}  received=${msg.receivedChunks}`
 		);
 		sendPlaybackStats(msg);
 	};
@@ -331,82 +352,119 @@ async function createAudioGraph() {
 	workletNode.connect(audioContext.destination);
 }
 
+function updateConnectionUi(message, detail) {
+	setStatus(message);
+	if (detail) {
+		setStatusDetail(detail);
+	}
+}
+
 async function startAudioStream() {
 	if (started) return;
+
 	userStopped = false;
 	started = true;
 	reconnectAttempts = 0;
+	clearReconnectTimer();
 
 	try {
-		setStatus("starting audio...");
+		updateConnectionUi("starting", "Prepping audio graph and opening the socket.");
 
 		if (!audioContext) {
 			await createAudioGraph();
 		}
+
 		await keepNativeBackgroundAudioAlive();
 		startResumeWatchdog();
 
 		connectWebSocket();
 	} catch (err) {
 		console.error(err);
-		setStatus(`error: ${err.message || err}`);
+		updateConnectionUi("error", err.message || String(err));
 		started = false;
 		await stopAudioStream();
 	}
 }
 
 function connectWebSocket() {
-	if (websocket && websocket.readyState <= WebSocket.OPEN) {
-		try { websocket.close(); } catch (_) {}
+	if (!started || userStopped) return;
+
+	clearReconnectTimer();
+
+	const currentToken = ++connectionToken;
+	const previousSocket = websocket;
+	websocket = null;
+
+	if (previousSocket) {
+		try {
+			previousSocket.onopen = null;
+			previousSocket.onmessage = null;
+			previousSocket.onerror = null;
+			previousSocket.onclose = null;
+			previousSocket.close();
+		} catch (_) {}
 	}
 
-	websocket = new WebSocket(WS_URL);
-	websocket.binaryType = "arraybuffer";
+	const socket = new WebSocket(WS_URL);
+	websocket = socket;
+	socket.binaryType = "arraybuffer";
 
-	websocket.onopen = () => {
+	updateConnectionUi("connecting", `Attempting ${WS_URL}`);
+
+	socket.onopen = () => {
+		if (websocket !== socket || currentToken !== connectionToken) return;
+
 		reconnectAttempts = 0;
-		setStatus(`connected: ${WS_URL}`);
+		clearReconnectTimer();
+		updateConnectionUi("connected", `Stream live through ${WS_URL}`);
 		resetPlaybackBuffer();
 		ensureAudioContextRunning();
 	};
 
-	websocket.onmessage = (event) => {
+	socket.onmessage = (event) => {
+		if (websocket !== socket || currentToken !== connectionToken) return;
+		if (!(event.data instanceof ArrayBuffer)) return;
+
 		if (!workletNode) {
-			if (!audioContext) {
-				createAudioGraph().then(() => {
-					workletNode.port.postMessage(event.data, [event.data]);
-				});
-			}
 			return;
 		}
-		if (!(event.data instanceof ArrayBuffer)) return;
 
 		ensureAudioContextRunning();
 		workletNode.port.postMessage(event.data, [event.data]);
 	};
 
-	websocket.onerror = (err) => {
+	socket.onerror = (err) => {
+		if (websocket !== socket || currentToken !== connectionToken) return;
 		console.error("WebSocket error:", err);
-		setStatus("websocket error");
+		updateConnectionUi("socket error", "Waiting for the reconnect cycle.");
 	};
 
-	websocket.onclose = () => {
-		if (userStopped) return;
+	socket.onclose = () => {
+		if (websocket !== socket || currentToken !== connectionToken) return;
 
+		websocket = null;
 		resetPlaybackBuffer();
-		setStatus("websocket closed - reconnecting...");
+
+		if (userStopped || !started) {
+			updateConnectionUi("stopped", "Stream halted locally.");
+			return;
+		}
+
 		scheduleReconnect();
 	};
 }
 
 function scheduleReconnect() {
 	if (userStopped || !started) return;
+	if (reconnectTimer) return;
 
 	reconnectAttempts++;
-	const delay = Math.min(RECONNECT_BASE_DELAY * reconnectAttempts, 10000);
-	setStatus(`reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+	const delay = Math.min(RECONNECT_BASE_DELAY * reconnectAttempts, RECONNECT_MAX_DELAY);
+	updateConnectionUi("reconnecting", `Retry in ${delay}ms. Attempt ${reconnectAttempts}.`);
 
-	setTimeout(() => {
+	reconnectTimer = window.setTimeout(() => {
+		reconnectTimer = null;
+
 		if (userStopped || !started) return;
 
 		ensureAudioContextRunning();
@@ -419,31 +477,37 @@ async function stopAudioStream() {
 	userStopped = true;
 	started = false;
 	reconnectAttempts = 0;
+	clearReconnectTimer();
 	stopResumeWatchdog();
 
-	if (websocket) {
+	const socket = websocket;
+	websocket = null;
+	if (socket) {
 		try {
-			websocket.close();
-		} catch (_) { }
-		websocket = null;
+			socket.onopen = null;
+			socket.onmessage = null;
+			socket.onerror = null;
+			socket.onclose = null;
+			socket.close();
+		} catch (_) {}
 	}
 
 	if (workletNode) {
 		try {
 			workletNode.disconnect();
-		} catch (_) { }
+		} catch (_) {}
 		workletNode = null;
 	}
 
 	if (audioContext) {
 		try {
 			await audioContext.close();
-		} catch (_) { }
+		} catch (_) {}
 		audioContext = null;
 	}
 
 	await releaseNativeBackgroundAudio();
-	setStatus("stopped");
+	updateConnectionUi("stopped", "Tap Start to reconnect.");
 }
 
 function handleAppPaused() {
@@ -467,9 +531,8 @@ function handleAppResumed() {
 	ensureAudioContextRunning();
 	startResumeWatchdog();
 
-	if (!websocket || websocket.readyState >= WebSocket.CLOSING) {
-		reconnectAttempts = 0;
-		connectWebSocket();
+	if (!websocket || websocket.readyState === WebSocket.CLOSED) {
+		scheduleReconnect();
 	}
 }
 
@@ -479,14 +542,55 @@ class CapacitorWelcome extends HTMLElement {
 		this.dataset.rendered = "true";
 
 		this.innerHTML = `
-			<div style="font-family: system-ui, sans-serif; padding: 24px; max-width: 560px; margin: 0 auto;">
-				<h1 style="margin: 0 0 8px; font-size: 24px;">Audio Phone Speaker</h1>
-				<p style="margin: 0 0 16px; color: #555;">Status: <span id="status">starting...</span></p>
-				<p style="margin: 0 0 20px; color: #555;">Stats: <span id="stats">-</span></p>
-				<div style="display: flex; gap: 12px; flex-wrap: wrap;">
-					<button id="start" type="button">Start</button>
-					<button id="stop" type="button">Stop</button>
-				</div>
+			<div class="app-shell">
+				<div class="ambient ambient-a"></div>
+				<div class="ambient ambient-b"></div>
+				<div class="ambient ambient-c"></div>
+
+				<main class="card">
+					<div class="card-topline">
+						<span class="eyebrow">Capacitor audio relay</span>
+						<span class="chip">loopback · adb reverse</span>
+					</div>
+
+					<header class="hero">
+						<p class="kicker">Audio Phone Speaker</p>
+						<h1>Controle um stream de áudio estável e silenciosamente persistente.</h1>
+						<p class="lede">
+							Recebe PCM 48 kHz do WebSocket local, mantém buffer, reage a pausas do Android
+							e evita a reconexão em cascata que travava o fluxo.
+						</p>
+					</header>
+
+					<section class="metrics">
+						<article class="metric metric-primary">
+							<span class="metric-label">Conexão</span>
+							<strong id="status">ready</strong>
+							<p id="status-detail">Pronto para iniciar o stream.</p>
+						</article>
+
+						<article class="metric">
+							<span class="metric-label">Buffer</span>
+							<strong id="stats">-</strong>
+							<p id="stats-detail">Aguardando áudio.</p>
+						</article>
+
+						<article class="metric">
+							<span class="metric-label">Rota</span>
+							<strong>127.0.0.1:5001</strong>
+							<p>ADB reverse + serviço nativo em foreground</p>
+						</article>
+					</section>
+
+					<section class="controls" aria-label="Audio controls">
+						<button id="start" type="button" class="btn btn-primary">Start stream</button>
+						<button id="stop" type="button" class="btn btn-secondary">Stop stream</button>
+					</section>
+
+					<div class="footnote">
+						Se a WebView oscilar, o app retoma sem abrir sockets duplicados.
+					</div>
+				</main>
 			</div>
 		`;
 
@@ -528,7 +632,11 @@ window.addEventListener("DOMContentLoaded", () => {
 		});
 	}
 
-	setStatus("ready");
+	if (!started) {
+		updateConnectionUi("ready", "Tap Start to open the local WebSocket.");
+		setStats("-");
+		setStatsDetail("Aguardando áudio.");
+	}
 });
 
 document.addEventListener("visibilitychange", () => {

@@ -1,5 +1,274 @@
 html,
 body {
-  padding: 0;
   margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(117, 207, 166, 0.14), transparent 34%),
+    radial-gradient(circle at top right, rgba(73, 118, 255, 0.18), transparent 28%),
+    linear-gradient(160deg, #08111a 0%, #0c1825 38%, #111827 100%);
+  color: #ecf4ff;
 }
+
+body {
+  font-family: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+capacitor-welcome {
+  display: block;
+  min-height: 100vh;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+  padding: 24px 16px 32px;
+}
+
+.ambient {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(18px);
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.ambient-a {
+  width: 240px;
+  height: 240px;
+  top: -70px;
+  left: -90px;
+  background: radial-gradient(circle, rgba(80, 234, 171, 0.28), rgba(80, 234, 171, 0));
+}
+
+.ambient-b {
+  width: 280px;
+  height: 280px;
+  top: 18%;
+  right: -120px;
+  background: radial-gradient(circle, rgba(64, 128, 255, 0.22), rgba(64, 128, 255, 0));
+}
+
+.ambient-c {
+  width: 160px;
+  height: 160px;
+  bottom: 10%;
+  left: 12%;
+  background: radial-gradient(circle, rgba(255, 193, 92, 0.12), rgba(255, 193, 92, 0));
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  max-width: 760px;
+  margin: 0 auto;
+  border: 1px solid rgba(168, 193, 214, 0.18);
+  border-radius: 28px;
+  padding: 28px 22px 24px;
+  background:
+    linear-gradient(180deg, rgba(8, 15, 24, 0.88), rgba(12, 20, 34, 0.92)),
+    rgba(10, 16, 27, 0.6);
+  box-shadow:
+    0 28px 70px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(18px);
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(145deg, rgba(126, 214, 172, 0.42), rgba(86, 131, 255, 0.12), rgba(255, 255, 255, 0.04));
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.card-topline {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: #9db5cf;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(150, 177, 205, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: #bdd0e6;
+  font-size: 12px;
+}
+
+.hero {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.kicker {
+  margin: 0;
+  color: #89f4c7;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 0.95;
+  letter-spacing: -0.05em;
+  color: #f7fbff;
+}
+
+.lede {
+  max-width: 58ch;
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.65;
+  color: #bfd1e5;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.metric {
+  padding: 18px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(160, 184, 208, 0.15);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03));
+  min-height: 132px;
+}
+
+.metric-primary {
+  background:
+    linear-gradient(180deg, rgba(103, 225, 170, 0.14), rgba(255, 255, 255, 0.04)),
+    rgba(255, 255, 255, 0.03);
+}
+
+.metric-label {
+  display: block;
+  margin-bottom: 10px;
+  color: #8ca0b9;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.metric strong {
+  display: block;
+  margin: 0 0 10px;
+  font-size: 1.15rem;
+  line-height: 1.2;
+  color: #f6fbff;
+  word-break: break-word;
+}
+
+.metric p {
+  margin: 0;
+  color: #aebfd4;
+  line-height: 1.55;
+}
+
+.controls {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.btn {
+  appearance: none;
+  border: 0;
+  border-radius: 16px;
+  padding: 14px 20px;
+  min-width: 148px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease,
+    border-color 180ms ease;
+}
+
+.btn:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+.btn-primary {
+  color: #06131e;
+  background: linear-gradient(135deg, #91f2c0, #6fc9ff);
+  box-shadow: 0 12px 24px rgba(70, 174, 191, 0.26);
+}
+
+.btn-secondary {
+  color: #e7f1ff;
+  border: 1px solid rgba(164, 188, 214, 0.24);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.footnote {
+  color: #90a2b9;
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    padding: 14px 12px 22px;
+  }
+
+  .card {
+    padding: 20px 16px 18px;
+    border-radius: 24px;
+  }
+
+  .card-topline {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .btn {
+    width: 100%;
+  }
+}
+
