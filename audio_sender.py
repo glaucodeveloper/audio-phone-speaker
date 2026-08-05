@@ -15,6 +15,7 @@ if len(sys.argv) < 2:
 
 import soundcard as sc
 import websockets
+from phone_microphone_bridge import MIC_PORT, MIC_RECORDING_EVENT, PhoneMicrophoneBridge
 
 HOST = "127.0.0.1"
 PORT = 5001
@@ -210,6 +211,7 @@ def prepare_android_device():
     print("Android tools: adb devices")
     devices = list_adb_devices()
     reset_adb_reverse(PORT, devices)
+    reset_adb_reverse(MIC_PORT, devices)
     open_android_app(devices)
 
 
@@ -219,6 +221,7 @@ async def android_device_poll_loop():
             devices = await asyncio.to_thread(list_adb_devices)
             if devices:
                 await asyncio.to_thread(setup_adb_reverse, PORT, devices)
+                await asyncio.to_thread(setup_adb_reverse, MIC_PORT, devices)
 
             now = asyncio.get_running_loop().time()
             for device in devices:
@@ -357,6 +360,8 @@ async def handler(websocket, path=None):
     async def send_audio():
         while True:
             pcm = await queue.get()
+            if MIC_RECORDING_EVENT.is_set():
+                pcm = b"\x00" * len(pcm)
             await websocket.send(pcm)
 
     try:
@@ -386,6 +391,8 @@ async def handler(websocket, path=None):
 async def main():
     prepare_android_device()
     poll_task = asyncio.create_task(android_device_poll_loop())
+    microphone_bridge = PhoneMicrophoneBridge()
+    await microphone_bridge.start()
     async with websockets.serve(
         handler,
         HOST,
@@ -400,6 +407,7 @@ async def main():
             await asyncio.Future()
         finally:
             poll_task.cancel()
+            await microphone_bridge.stop()
 
 
 if __name__ == "__main__":

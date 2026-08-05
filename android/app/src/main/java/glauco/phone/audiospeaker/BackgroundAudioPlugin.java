@@ -2,6 +2,7 @@ package glauco.phone.audiospeaker;
 
 import android.content.Intent;
 import android.os.Build;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -13,17 +14,16 @@ public class BackgroundAudioPlugin extends Plugin {
     @PluginMethod
     public void keepAlive(PluginCall call) {
         Intent intent = new Intent(getContext(), BackgroundAudioService.class);
-        intent.setAction(BackgroundAudioService.ACTION_START);
-
+        // Called from the visible WebView after RECORD_AUDIO was granted.
+        intent.setAction(BackgroundAudioService.ACTION_START_DUPLEX);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getContext().startForegroundService(intent);
         } else {
             getContext().startService(intent);
         }
-
-        JSObject ret = new JSObject();
-        ret.put("active", true);
-        call.resolve(ret);
+        JSObject result = new JSObject();
+        result.put("active", true);
+        call.resolve(result);
     }
 
     @PluginMethod
@@ -31,9 +31,8 @@ public class BackgroundAudioPlugin extends Plugin {
         Intent intent = new Intent(getContext(), BackgroundAudioService.class);
         intent.setAction(BackgroundAudioService.ACTION_STOP);
         getContext().startService(intent);
-
-        JSObject ret = new JSObject();
-        ret.put("active", false);
-        call.resolve(ret);
+        JSObject result = new JSObject();
+        result.put("active", false);
+        call.resolve(result);
     }
 }

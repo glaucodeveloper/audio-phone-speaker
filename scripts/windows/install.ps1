@@ -1,7 +1,9 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$TaskName = "Audio Phone Speaker",
+    [string]$VirtualMicrophonePlaybackDevice = "CABLE Input",
+    [switch]$RequireVirtualMicrophone,
     [switch]$BuildAndroid,
     [switch]$InstallAndroidApp,
     [switch]$ForceRecreateVenv
@@ -18,6 +20,7 @@ function Write-Step {
 
 function Resolve-PythonCommand {
     $candidates = @(
+        @{ File = "py"; Args = @("-3.14") },
         @{ File = "py"; Args = @("-3.13") },
         @{ File = "py"; Args = @("-3.12") },
         @{ File = "py"; Args = @("-3.11") },
@@ -28,32 +31,22 @@ function Resolve-PythonCommand {
 
     foreach ($candidate in $candidates) {
         $command = Get-Command $candidate.File -ErrorAction SilentlyContinue
-        if (-not $command) {
-            continue
-        }
-
+        if (-not $command) { continue }
         try {
             & $command.Source @($candidate.Args) -c "import sys; print(sys.executable)" *> $null
             if ($LASTEXITCODE -eq 0) {
-                return @{
-                    File = $command.Source
-                    Args = @($candidate.Args)
-                }
+                return @{ File = $command.Source; Args = @($candidate.Args) }
             }
         }
-        catch {
-            continue
-        }
+        catch { continue }
     }
 
-    throw "Python 3 não encontrado. Instale Python 3.11, 3.12 ou 3.13 e execute novamente."
+    throw "Python 3 não encontrado. Instale Python 3.11 ou superior."
 }
 
 function Resolve-Adb {
     $command = Get-Command adb -ErrorAction SilentlyContinue
-    if ($command) {
-        return $command.Source
-    }
+    if ($command) { return $command.Source }
 
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"),
@@ -62,9 +55,7 @@ function Resolve-Adb {
     )
 
     foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            return (Resolve-Path $candidate).Path
-        }
+        if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
     }
 
     throw "adb não encontrado. Instale Android SDK Platform-Tools."
@@ -75,24 +66,22 @@ function Resolve-JavaHome {
         return $env:JAVA_HOME
     }
 
-    $candidates = @(
+    $directCandidates = @(
         "C:\Program Files\Android\Android Studio\jbr",
-        "C:\Program Files\Eclipse Adoptium\jdk-21*",
-        "C:\Program Files\Java\jdk-21*"
+        "C:\Program Files\Java\jdk-21"
     )
+    foreach ($candidate in $directCandidates) {
+        if (Test-Path (Join-Path $candidate "bin\java.exe")) { return $candidate }
+    }
 
-    foreach ($candidate in $candidates) {
-        $matches = Get-ChildItem $candidate -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending
-
-        foreach ($match in $matches) {
-            if (Test-Path (Join-Path $match.FullName "bin\java.exe")) {
-                return $match.FullName
-            }
-        }
-
-        if (Test-Path (Join-Path $candidate "bin\java.exe")) {
-            return $candidate
+    foreach ($root in @("C:\Program Files\Eclipse Adoptium", "C:\Program Files\Java")) {
+        if (-not (Test-Path $root)) { continue }
+        $match = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "*21*" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($match -and (Test-Path (Join-Path $match.FullName "bin\java.exe"))) {
+            return $match.FullName
         }
     }
 
@@ -109,39 +98,73 @@ $Sender = Join-Path $ProjectDir "audio_sender.py"
 $Runner = Join-Path $ProjectDir "scripts\windows\run-sender.ps1"
 $VenvDir = Join-Path $ProjectDir ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$WindowsConfig = Join-Path $ProjectDir ".audio-speaker.windows.ps1"
 $Apk = Join-Path $ProjectDir "android\app\build\outputs\apk\debug\app-debug.apk"
 
 foreach ($required in @($Requirements, $Sender, $Runner)) {
-    if (-not (Test-Path $required)) {
-        throw "Arquivo obrigatório não encontrado: $required"
-    }
+    if (-not (Test-Path $required)) { throw "Arquivo obrigatório não encontrado: $required" }
 }
 
-Write-Step "Localizando Python"
+Write-Step "Preparando ambiente Python"
 $PythonCommand = Resolve-PythonCommand
 Write-Host "Python: $($PythonCommand.File) $($PythonCommand.Args -join ' ')"
 
 if ($ForceRecreateVenv -and (Test-Path $VenvDir)) {
-    Write-Step "Removendo ambiente virtual existente"
     Remove-Item -Recurse -Force $VenvDir
 }
-
 if (-not (Test-Path $VenvPython)) {
-    Write-Step "Criando ambiente virtual"
     & $PythonCommand.File @($PythonCommand.Args) -m venv $VenvDir
-    if ($LASTEXITCODE -ne 0) {
-        throw "Falha ao criar o ambiente virtual."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao criar o ambiente virtual." }
 }
 
-Write-Step "Instalando dependências Python"
-& $VenvPython -m pip install --upgrade pip
+& $VenvPython -m pip install --upgrade pip wheel setuptools
 & $VenvPython -m pip install -r $Requirements
+if ($LASTEXITCODE -ne 0) { throw "Falha ao instalar as dependências Python." }
 
-# O SoundCard 0.4.6 pode consultar sys.argv[1] durante o import.
-& $VenvPython -c "import sys; sys.argv.append('audio-phone-speaker'); import numpy, soundcard, websockets; print('Dependencias do sender: OK')"
-if ($LASTEXITCODE -ne 0) {
-    throw "Falha ao validar as dependências Python."
+& $VenvPython -c "import sys; sys.argv.append('audio-phone-speaker'); import numpy, soundcard, sounddevice, websockets; print('Dependencias do sender: OK')"
+if ($LASTEXITCODE -ne 0) { throw "Falha ao validar as dependências Python." }
+
+Write-Step "Configurando microfone virtual do Windows"
+$escapedDevice = $VirtualMicrophonePlaybackDevice.Replace("'", "''")
+@"
+`$env:PHONE_MIC_PLAYBACK_DEVICE = '$escapedDevice'
+`$env:PHONE_MIC_OUTPUT_RATE = '48000'
+`$env:PHONE_MIC_SAMPLE_RATE = '16000'
+`$env:PHONE_MIC_CHANNELS = '1'
+`$env:PHONE_SPEAKER_PORT = '5001'
+`$env:PHONE_MIC_PORT = '5002'
+`$env:PHONE_MIC_CONTROL_PORT = '5003'
+"@ | Set-Content -Path $WindowsConfig -Encoding UTF8
+
+$deviceCheckScript = @'
+import sounddevice as sd
+import sys
+needle = sys.argv[1].casefold()
+matches = [
+    d["name"] for d in sd.query_devices()
+    if int(d["max_output_channels"]) > 0 and needle in str(d["name"]).casefold()
+]
+if matches:
+    print("Dispositivo de saída do cabo virtual:", matches[0])
+    raise SystemExit(0)
+print("Dispositivo não encontrado:", sys.argv[1])
+print("Saídas disponíveis:")
+for d in sd.query_devices():
+    if int(d["max_output_channels"]) > 0:
+        print(" -", d["name"])
+raise SystemExit(2)
+'@
+
+& $VenvPython -c $deviceCheckScript $VirtualMicrophonePlaybackDevice
+$virtualMicFound = $LASTEXITCODE -eq 0
+if (-not $virtualMicFound) {
+    $message = @"
+O endpoint de reprodução '$VirtualMicrophonePlaybackDevice' não foi encontrado.
+Instale VB-CABLE ou VoiceMeeter. No VB-CABLE, o sender escreve em 'CABLE Input'
+e os programas usam 'CABLE Output' como microfone.
+"@
+    if ($RequireVirtualMicrophone) { throw $message }
+    Write-Warning $message
 }
 
 Write-Step "Localizando ADB"
@@ -149,119 +172,70 @@ $Adb = Resolve-Adb
 $AdbDir = Split-Path $Adb -Parent
 $env:PATH = "$AdbDir;$env:PATH"
 Write-Host "ADB: $Adb"
-
 & $Adb start-server
 & $Adb devices -l
 
 if ($BuildAndroid -or $InstallAndroidApp) {
-    Write-Step "Preparando ambiente de build Android"
-
+    Write-Step "Compilando o aplicativo Android"
     foreach ($commandName in @("node", "npm", "npx")) {
         if (-not (Get-Command $commandName -ErrorAction SilentlyContinue)) {
-            throw "$commandName não encontrado. Instale Node.js antes de compilar o Android."
+            throw "$commandName não encontrado. Instale Node.js."
         }
     }
 
     $JavaHome = Resolve-JavaHome
-    if (-not $JavaHome) {
-        throw "JDK 21 não encontrado. Instale Android Studio ou um JDK 21."
-    }
-
+    if (-not $JavaHome) { throw "JDK 21 não encontrado. Instale Android Studio ou OpenJDK 21." }
     $env:JAVA_HOME = $JavaHome
     $env:PATH = "$(Join-Path $JavaHome 'bin');$env:PATH"
     Write-Host "JAVA_HOME: $JavaHome"
 
     Push-Location $ProjectDir
     try {
-        Write-Step "Instalando dependências Node"
-        if (Test-Path (Join-Path $ProjectDir "package-lock.json")) {
-            & npm ci
-        }
-        else {
-            & npm install
-        }
-        if ($LASTEXITCODE -ne 0) {
-            throw "npm install falhou."
-        }
-
-        Write-Step "Gerando aplicação web"
+        if (Test-Path (Join-Path $ProjectDir "package-lock.json")) { & npm ci } else { & npm install }
+        if ($LASTEXITCODE -ne 0) { throw "npm install falhou." }
         & npm run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "npm run build falhou."
-        }
-
-        Write-Step "Sincronizando Capacitor"
+        if ($LASTEXITCODE -ne 0) { throw "npm run build falhou." }
         & npx cap sync android
-        if ($LASTEXITCODE -ne 0) {
-            throw "npx cap sync android falhou."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "npx cap sync android falhou." }
 
-        Write-Step "Compilando APK debug"
         Push-Location (Join-Path $ProjectDir "android")
         try {
             & .\gradlew.bat clean assembleDebug --no-daemon --console=plain
-            if ($LASTEXITCODE -ne 0) {
-                throw "Gradle falhou."
-            }
+            if ($LASTEXITCODE -ne 0) { throw "Gradle falhou." }
         }
-        finally {
-            Pop-Location
-        }
+        finally { Pop-Location }
     }
-    finally {
-        Pop-Location
-    }
+    finally { Pop-Location }
 
-    if (-not (Test-Path $Apk)) {
-        throw "APK não encontrado após o build: $Apk"
-    }
-
+    if (-not (Test-Path $Apk)) { throw "APK não encontrado: $Apk" }
     Write-Host "APK: $Apk"
 }
 
 if ($InstallAndroidApp) {
-    Write-Step "Instalando APK no aparelho"
+    Write-Step "Instalando APK no celular"
+    $devices = & $Adb devices | Select-Object -Skip 1 | Where-Object { $_ -match "\sdevice$" }
+    if (-not $devices) { throw "Nenhum aparelho ADB autorizado foi encontrado." }
 
-    $devices = & $Adb devices |
-        Select-Object -Skip 1 |
-        Where-Object { $_ -match "\sdevice$" }
-
-    if (-not $devices) {
-        throw "Nenhum aparelho ADB autorizado foi encontrado."
-    }
-
-    & $Adb shell am force-stop glauco.phone.audiospeaker 2>$null
     & $Adb install -r $Apk
-    if ($LASTEXITCODE -ne 0) {
-        throw "Falha ao instalar o APK."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao instalar o APK." }
 
-    & $Adb reverse --remove tcp:5000 2>$null
-    & $Adb reverse tcp:5000 tcp:5000
+    foreach ($port in @(5001, 5002, 5003)) {
+        & $Adb reverse "tcp:$port" "tcp:$port"
+    }
+    & $Adb shell pm grant glauco.phone.audiospeaker android.permission.RECORD_AUDIO 2>$null
     & $Adb shell pm grant glauco.phone.audiospeaker android.permission.POST_NOTIFICATIONS 2>$null
     & $Adb shell dumpsys deviceidle whitelist +glauco.phone.audiospeaker
+    & $Adb shell am start -n glauco.phone.audiospeaker/.MainActivity
 }
 
 Write-Step "Registrando inicialização automática"
-
 $PowerShellExe = (Get-Command powershell.exe).Source
 $Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ProjectDir "{1}"' -f $Runner, $ProjectDir
 $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-$Action = New-ScheduledTaskAction `
-    -Execute $PowerShellExe `
-    -Argument $Arguments `
-    -WorkingDirectory $ProjectDir
-
-$Trigger = New-ScheduledTaskTrigger `
-    -AtLogOn `
-    -User $CurrentUser
-
-$Principal = New-ScheduledTaskPrincipal `
-    -UserId $CurrentUser `
-    -LogonType Interactive `
-    -RunLevel Limited
-
+$Action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $Arguments -WorkingDirectory $ProjectDir
+$Trigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
+$Principal = New-ScheduledTaskPrincipal -UserId $CurrentUser -LogonType Interactive -RunLevel Limited
 $Settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
@@ -271,31 +245,19 @@ $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew
 
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-
 Register-ScheduledTask `
     -TaskName $TaskName `
-    -Description "Executa o sender do Audio Phone Speaker na sessão interativa do usuário." `
+    -Description "Ponte duplex entre o áudio do Windows e o celular Android." `
     -Action $Action `
     -Trigger $Trigger `
     -Principal $Principal `
     -Settings $Settings `
     -Force | Out-Null
-
 Start-ScheduledTask -TaskName $TaskName
 
-if ($InstallAndroidApp) {
-    Start-Sleep -Seconds 3
-    & $Adb shell am start -n glauco.phone.audiospeaker/.MainActivity
-}
-
 Write-Step "Instalação concluída"
-
-Get-ScheduledTask -TaskName $TaskName |
-    Select-Object TaskName, State
-
-Write-Host ""
-Write-Host "Logs do sender:"
-Write-Host "  Get-Content `"$env:LOCALAPPDATA\AudioPhoneSpeaker\sender.log`" -Tail 100 -Wait"
-Write-Host ""
-Write-Host "Remover inicialização automática:"
-Write-Host "  .\scripts\windows\uninstall-autostart.ps1"
+Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State
+Write-Host "Log: $env:LOCALAPPDATA\AudioPhoneSpeaker\sender.log"
+if (-not $virtualMicFound) {
+    Write-Warning "O speaker funcionará, mas o microfone do celular só aparecerá após instalar/configurar um cabo virtual."
+}

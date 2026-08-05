@@ -15,3 +15,6 @@ android/build/
 android/app/build/
 android/local.properties
 .service-update-backup-*/
+.audio-speaker.env
+.audio-speaker.windows.ps1
+.publish-backup-*/

@@ -9,32 +9,33 @@ import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.webkit.WebView;
+
+import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+
 import com.getcapacitor.BridgeActivity;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class MainActivity extends BridgeActivity {
-    private static final int REQUEST_POST_NOTIFICATIONS = 1001;
+    private static final int REQUEST_RUNTIME_PERMISSIONS = 1001;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         registerPlugin(BackgroundAudioPlugin.class);
         super.onCreate(savedInstanceState);
-        requestBackgroundRuntimeExemptions();
-        startBackgroundAudioService();
-    }
-
-    @Override
-    public void onWindowFocusChanged(boolean hasFocus) {
-        super.onWindowFocusChanged(hasFocus);
+        configureWebViewAudio();
+        requestBatteryOptimizationExemptionIfNeeded();
+        requestPermissionsAndStartService();
     }
 
     @Override
     public void onPause() {
+        configureWebViewAudio();
         if (bridge != null && bridge.getWebView() != null) {
-            WebView webView = bridge.getWebView();
-            webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
-            webView.onWindowFocusChanged(true);
+            bridge.getWebView().onWindowFocusChanged(true);
         }
         super.onPause();
     }
@@ -42,17 +43,58 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
-        if (bridge != null && bridge.getWebView() != null) {
-            WebView webView = bridge.getWebView();
-            webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
+        configureWebViewAudio();
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED) {
+            startBackgroundAudioService();
         }
-        startBackgroundAudioService();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+        int requestCode,
+        @NonNull String[] permissions,
+        @NonNull int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_RUNTIME_PERMISSIONS) {
+            // Speaker mode remains available even if microphone permission was denied.
+            startBackgroundAudioService();
+        }
+    }
+
+    private void configureWebViewAudio() {
+        if (bridge == null || bridge.getWebView() == null) return;
+        WebView webView = bridge.getWebView();
+        webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
+    }
+
+    private void requestPermissionsAndStartService() {
+        List<String> missing = new ArrayList<>();
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+
+        if (missing.isEmpty()) {
+            startBackgroundAudioService();
+        } else {
+            ActivityCompat.requestPermissions(
+                this,
+                missing.toArray(new String[0]),
+                REQUEST_RUNTIME_PERMISSIONS
+            );
+        }
     }
 
     private void startBackgroundAudioService() {
         Intent intent = new Intent(this, BackgroundAudioService.class);
-        intent.setAction(BackgroundAudioService.ACTION_START);
-
+        intent.setAction(BackgroundAudioService.ACTION_START_DUPLEX);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent);
         } else {
@@ -60,43 +102,12 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    private void requestBackgroundRuntimeExemptions() {
-        requestNotificationPermissionIfNeeded();
-        requestBatteryOptimizationExemptionIfNeeded();
-    }
-
-    private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return;
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            == PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-
-        ActivityCompat.requestPermissions(
-            this,
-            new String[] { Manifest.permission.POST_NOTIFICATIONS },
-            REQUEST_POST_NOTIFICATIONS
-        );
-    }
-
     private void requestBatteryOptimizationExemptionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return;
-        }
-
-        PowerManager powerManager = getSystemService(PowerManager.class);
-        if (powerManager == null || powerManager.isIgnoringBatteryOptimizations(getPackageName())) {
-            return;
-        }
-
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        PowerManager manager = getSystemService(PowerManager.class);
+        if (manager == null || manager.isIgnoringBatteryOptimizations(getPackageName())) return;
         Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
         intent.setData(Uri.parse("package:" + getPackageName()));
-
-        if (intent.resolveActivity(getPackageManager()) != null) {
-            startActivity(intent);
-        }
+        if (intent.resolveActivity(getPackageManager()) != null) startActivity(intent);
     }
 }

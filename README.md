@@ -1,98 +1,206 @@
 # audio-phone-speaker
 
-Android app + Python sender para tocar no celular o audio capturado do speaker/loopback do PC via `ws://127.0.0.1:5001`.
+Ponte de áudio duplex entre um computador e um celular Android conectado por ADB.
 
-## O que este projeto faz
-
-- O app Android roda em foreground service para continuar ativo em background.
-- O sender Python abre `adb reverse`, sobe o servidor WebSocket local e tenta manter o app reconectado.
-- O sender tambem monitora `droppedChunks` e `underflows`; se detectar degradacao, ele faz resync automatico do ADB/WebSocket.
-
-## Estrutura
-
-- [audio_sender.py](/C:/dev/audio-phone-speaker/audio_sender.py:1): sender Python incluido no repo.
-- [src/js/capacitor-welcome.js](/C:/dev/audio-phone-speaker/src/js/capacitor-welcome.js:1): cliente WebSocket/AudioWorklet do app.
-- [android/app/src/main/java/glauco/phone/audiospeaker/MainActivity.java](/C:/dev/audio-phone-speaker/android/app/src/main/java/glauco/phone/audiospeaker/MainActivity.java:1): inicializacao do foreground service e pedidos de permissao/excecao de bateria.
-- [android/app/src/main/java/glauco/phone/audiospeaker/BackgroundAudioService.java](/C:/dev/audio-phone-speaker/android/app/src/main/java/glauco/phone/audiospeaker/BackgroundAudioService.java:1): servico nativo de background.
-
-## Requisitos
-
-- Node.js com `npm`
-- Python 3
-- Android SDK com `adb`
-- Android Studio JBR 21 disponivel em `C:/Program Files/Android/Android Studio/jbr`
-- Dependencias Python:
-
-```powershell
-python -m pip install -r requirements-audio-sender.txt
+```text
+áudio do computador ── WebSocket 5001 ──> alto-falante do celular
+microfone do celular ── TCP PCM 5002 ──> microfone virtual do computador
+controle do microfone ── HTTP 5003
 ```
 
-## Build do app
+O aplicativo Android permanece em foreground service. O processo Python configura `adb reverse`, captura o loopback do computador e recebe o microfone do celular em PCM mono de 16 kHz.
+
+## Plataformas do computador
+
+| Plataforma | Saída no celular | Celular como microfone do sistema |
+|---|---:|---:|
+| Linux + PipeWire/Pulse | Sim | `glauco_phone_mic`, criado automaticamente |
+| Windows | Sim | Sim, por VB-CABLE, VoiceMeeter ou cabo virtual equivalente |
+| macOS | Sim | Sim, por BlackHole ou dispositivo virtual equivalente |
+
+## Requisitos comuns
+
+- Python 3.11 ou superior;
+- Android SDK Platform-Tools (`adb`);
+- celular Android com depuração USB autorizada;
+- Node.js, JDK 21 e Android SDK apenas para recompilar o APK.
+
+O aplicativo Android solicita `RECORD_AUDIO`, notificação e exclusão de otimização de bateria.
+
+## Linux
+
+Instale as dependências de áudio do sistema. Em Arch/Manjaro:
+
+```bash
+sudo pacman -S --needed python python-pip android-tools pipewire-pulse libpulse
+```
+
+Instale e inicie o serviço do usuário:
+
+```bash
+git clone https://github.com/glaucodeveloper/audio-phone-speaker.git
+cd audio-phone-speaker
+chmod +x scripts/linux/*.sh
+./scripts/linux/install-service.sh
+```
+
+Verifique:
+
+```bash
+systemctl --user status audio-speaker
+journalctl --user -u audio-speaker -f
+pactl list sources short | grep glauco_phone_mic
+pactl get-default-source
+```
+
+A fonte aparece como **Glauco Phone Microphone**. O estado `SUSPENDED` é normal quando nenhum programa está gravando.
+
+Remoção:
+
+```bash
+./scripts/linux/uninstall-service.sh
+```
+
+## Windows
+
+O Windows precisa de um cabo de áudio virtual para expor o PCM recebido como dispositivo de gravação. Com VB-CABLE:
+
+```text
+sender Python escreve em: CABLE Input
+aplicativos usam como mic: CABLE Output
+```
+
+Depois de instalar o cabo virtual, abra PowerShell no repositório:
 
 ```powershell
-npm install
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\windows\install.ps1
+```
+
+Para compilar e instalar também o APK:
+
+```powershell
+.\scripts\windows\install.ps1 -BuildAndroid -InstallAndroidApp
+```
+
+Para VoiceMeeter ou outro endpoint:
+
+```powershell
+.\scripts\windows\install.ps1 `
+  -VirtualMicrophonePlaybackDevice "VoiceMeeter Input"
+```
+
+A instalação cria uma tarefa no Agendador do Windows para iniciar a ponte na sessão interativa do usuário. Isso é necessário para acesso aos dispositivos de áudio.
+
+Verificação:
+
+```powershell
+.\scripts\windows\check-virtual-microphone.ps1
+Get-ScheduledTask -TaskName "Audio Phone Speaker"
+Get-Content "$env:LOCALAPPDATA\AudioPhoneSpeaker\sender.log" -Tail 100 -Wait
+```
+
+Remoção da inicialização automática:
+
+```powershell
+.\scripts\windows\uninstall-autostart.ps1
+```
+
+## Execução manual
+
+```bash
+python -m venv .venv
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements-audio-sender.txt
+python audio_sender.py
+```
+
+Windows:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-audio-sender.txt
+$env:PHONE_MIC_PLAYBACK_DEVICE = "CABLE Input"
+python .\audio_sender.py
+```
+
+Saída esperada:
+
+```text
+Speaker server running on ws://127.0.0.1:5001
+Phone microphone transport: tcp://127.0.0.1:5002
+Phone microphone control:   http://127.0.0.1:5003
+Phone microphone connected
+```
+
+## API local do microfone
+
+```bash
+curl http://127.0.0.1:5003/status
+curl -X POST http://127.0.0.1:5003/microphone/start
+curl -X POST http://127.0.0.1:5003/microphone/stop
+```
+
+Essa API permite que aplicações como o GlaucoPlastic ativem ou suspendam o encaminhamento sem depender de `SpeechRecognition` do WebView.
+
+## Build Android
+
+Use JDK 21 convencional ou o JBR do Android Studio. GraalVM pode falhar na transformação `androidJdkImage` do Gradle.
+
+```bash
+npm ci
+npm run build
+npx cap sync android
+cd android
+./gradlew assembleDebug
+```
+
+No Windows:
+
+```powershell
+npm ci
 npm run build
 npx cap sync android
 cd android
 .\gradlew.bat assembleDebug
 ```
 
-APK debug gerado em:
+APK:
 
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Execucao em modo depuracao
+Instale e configure as portas:
 
-1. Conecte o celular por USB e autorize o ADB.
-2. Instale o APK debug:
-
-```powershell
-adb install -r android\app\build\outputs\apk\debug\app-debug.apk
-```
-
-3. Rode o sender:
-
-```powershell
-python .\audio_sender.py
-```
-
-## Requisitos de background forever ativo
-
-Para o app ficar o mais persistente possivel durante depuracao:
-
-- O app abre um `ForegroundService` automaticamente.
-- O app pede permissao de notificacao em Android 13+.
-- O app pede exclusao de otimização de bateria ao abrir.
-- O sender tenta adicionar o pacote na whitelist de `deviceidle`.
-
-Se quiser forcar manualmente no aparelho conectado:
-
-```powershell
-adb shell dumpsys deviceidle whitelist +glauco.phone.audiospeaker
-adb shell dumpsys deviceidle whitelist
+```bash
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb reverse tcp:5001 tcp:5001
+adb reverse tcp:5002 tcp:5002
+adb reverse tcp:5003 tcp:5003
 ```
 
-## Debug de streaming
+## Configuração por ambiente
 
-Na tela do app:
+| Variável | Padrão | Função |
+|---|---|---|
+| `PHONE_SPEAKER_PORT` | `5001` | áudio do computador para o celular |
+| `PHONE_MIC_PORT` | `5002` | PCM do celular para o computador |
+| `PHONE_MIC_CONTROL_PORT` | `5003` | API HTTP local |
+| `PHONE_MIC_SOURCE_NAME` | `glauco_phone_mic` | nome da fonte no Linux |
+| `PHONE_MIC_SET_DEFAULT` | `1` | torna a fonte Linux padrão |
+| `PHONE_MIC_PLAYBACK_DEVICE` | automático | endpoint virtual no Windows/macOS |
+| `PHONE_MIC_OUTPUT_RATE` | `48000` | taxa do cabo virtual |
 
-- `buffer`: quantidade de audio em buffer
-- `dropped`: chunks descartados por atraso
-- `underflows`: frames zerados por falta de audio
+## Arquitetura
 
-Se `dropped` ou `underflows` piorarem, o sender tenta:
-
-- refazer `adb reverse`
-- manter o app aberto
-- fechar a conexao atual para forcar reconexao limpa
-
-## Observacoes
-
-- O endereco de conexao e fixo em `127.0.0.1`.
-- O fluxo depende de `adb reverse`, entao o servidor Python deve rodar no PC.
-- O sender usa loopback do speaker padrao via `soundcard`.
-
-Veja [Inicialização automática no Linux e Windows](docs/autostart.md).
+- `audio_sender.py`: servidor duplex, ADB, loopback, fonte virtual e API local;
+- `PhoneMicrophoneBridge.java`: captura Android com `AudioRecord` e transmite PCM;
+- `BackgroundAudioService.java`: foreground service de playback e microfone;
+- `scripts/linux`: serviço `systemd --user`;
+- `scripts/windows`: instalação, tarefa de logon e validação do cabo virtual.

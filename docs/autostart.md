@@ -1,47 +1,36 @@
-# Inicialização automática do sender
-
-O sender e o aplicativo usam a porta `5000`. Não use `5001` no script de
-inicialização.
+# Inicialização automática
 
 ## Linux
 
+A ponte precisa acessar a sessão PipeWire do usuário. Por isso, a instalação usa `systemd --user`, não um serviço global executado como root.
+
 ```bash
-chmod +x scripts/linux/*.sh
 ./scripts/linux/install-service.sh
+systemctl --user status audio-speaker
+journalctl --user -u audio-speaker -f
 ```
 
-Verificação:
+A unit fica em:
 
-```bash
-systemctl --user status audio-phone-speaker.service --no-pager --full
-journalctl --user -u audio-phone-speaker.service -f
-adb reverse --list
-ss -ltnp | grep ':5000'
+```text
+~/.config/systemd/user/audio-speaker.service
 ```
 
-Remoção:
-
-```bash
-./scripts/linux/uninstall-service.sh
-```
+O serviço aguarda PipeWire/Pulse, configura ADB e reinicia em caso de falha.
 
 ## Windows
 
-Abra PowerShell:
+A ponte precisa rodar na sessão interativa para acessar WASAPI e o cabo virtual. O instalador registra uma tarefa no logon:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-cd C:\dev\audio-phone-speaker
-.\scripts\windows\install-autostart.ps1
+.\scripts\windows\install.ps1
+Get-ScheduledTask -TaskName "Audio Phone Speaker"
 ```
 
-Verificação:
+Log:
 
 ```powershell
-Get-ScheduledTask -TaskName "Audio Phone Speaker"
 Get-Content "$env:LOCALAPPDATA\AudioPhoneSpeaker\sender.log" -Tail 100 -Wait
-adb reverse --list
-Get-NetTCPConnection -LocalPort 5000 -State Listen
 ```
 
 Remoção:

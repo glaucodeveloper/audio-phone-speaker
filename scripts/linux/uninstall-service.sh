@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-UNIT_FILE="$HOME/.config/systemd/user/audio-phone-speaker.service"
+SERVICE_NAME="${AUDIO_SPEAKER_SERVICE_NAME:-audio-speaker}"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
-systemctl --user disable --now audio-phone-speaker.service 2>/dev/null || true
-rm -f "$UNIT_FILE"
+systemctl --user disable --now "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+rm -f "$UNIT_DIR/$SERVICE_NAME.service"
 systemctl --user daemon-reload
-systemctl --user reset-failed audio-phone-speaker.service 2>/dev/null || true
+systemctl --user reset-failed "$SERVICE_NAME.service" >/dev/null 2>&1 || true
 
-echo "Serviço removido: $UNIT_FILE"
+echo "Serviço $SERVICE_NAME removido."
