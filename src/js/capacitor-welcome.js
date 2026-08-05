@@ -5,6 +5,14 @@
 // Depois conecte em:
 //   ws://127.0.0.1:5001
 
+import "@carbon/styles/css/styles.css";
+import "@carbon/web-components/es/components/button/index.js";
+import "@carbon/web-components/es/components/tabs/index.js";
+import "@carbon/web-components/es/components/accordion/index.js";
+import "@carbon/web-components/es/components/tag/index.js";
+import "@carbon/web-components/es/components/notification/index.js";
+import "@carbon/web-components/es/components/data-table/index.js";
+
 const WS_URL = "ws://127.0.0.1:5001";
 
 const SAMPLE_RATE = 48000;
@@ -26,6 +34,7 @@ let backgroundKeepAliveEnabled = false;
 let userStopped = false;
 let reconnectAttempts = 0;
 let connectionToken = 0;
+let startupPollTimer = null;
 
 const RECONNECT_BASE_DELAY = 1000;
 const RECONNECT_MAX_DELAY = 10000;
@@ -187,24 +196,66 @@ registerProcessor("pcm-player", PCMPlayerProcessor);
 `;
 
 function setStatus(text) {
-	const el = document.getElementById("status");
-	if (el) el.textContent = text;
+	const el = document.getElementById("connection-notification");
+	if (el) el.title = text;
 	console.log(text);
 }
 
 function setStatusDetail(text) {
-	const el = document.getElementById("status-detail");
+	const el = document.getElementById("connection-notification");
+	if (el) el.subtitle = text;
+}
+
+function setConnectionChip(text) {
+	const el = document.getElementById("connection-chip");
+	if (el) el.textContent = text;
+}
+
+function setDataCell(id, text) {
+	const el = document.getElementById(id);
 	if (el) el.textContent = text;
 }
 
 function setStats(text) {
-	const el = document.getElementById("stats");
+	const el = document.getElementById("buffer-value");
 	if (el) el.textContent = text;
 }
 
 function setStatsDetail(text) {
-	const el = document.getElementById("stats-detail");
+	const el = document.getElementById("buffer-detail");
 	if (el) el.textContent = text;
+}
+
+function setStartupState(text) {
+	const el = document.getElementById("startup-state");
+	if (el) el.textContent = text;
+}
+
+function setStartupDetail(text) {
+	const el = document.getElementById("startup-detail");
+	if (el) el.textContent = text;
+}
+
+function setActiveTab(tabName) {
+	const tabs = document.querySelectorAll("[data-audio-tab]");
+	const panels = document.querySelectorAll("[data-audio-panel]");
+
+	tabs.forEach((tab) => {
+		const active = tab.dataset.audioTab === tabName;
+		tab.toggleAttribute("selected", active);
+		tab.classList.toggle("is-active", active);
+	});
+
+	panels.forEach((panel) => {
+		const active = panel.dataset.audioPanel === tabName;
+		panel.classList.toggle("is-active", active);
+	});
+}
+
+function clearStartupPollTimer() {
+	if (!startupPollTimer) return;
+	window.clearInterval(startupPollTimer);
+	startupPollTimer = null;
 }
 
 function clearReconnectTimer() {
@@ -276,6 +327,40 @@ async function releaseNativeBackgroundAudio() {
 	}
 }
 
+function formatStartupState(snapshot) {
+	const appState = snapshot?.appForeground ? "foreground" : "background";
+	const serviceState = snapshot?.serviceRunning ? "running" : "stopped";
+	const lastSource = snapshot?.lastSource || "unknown";
+	return `app=${appState} service=${serviceState}`;
+}
+
+async function refreshStartupState() {
+	const plugin = window.Capacitor?.Plugins?.BackgroundAudio;
+	if (!plugin?.getStartupState) {
+		setStartupState("unavailable");
+		setStartupDetail("Native startup snapshot unavailable.");
+		return;
+	}
+
+	try {
+		const snapshot = await plugin.getStartupState();
+		setStartupState(formatStartupState(snapshot));
+		setStartupDetail(`last=${snapshot?.lastSource || "unknown"} · bridge=shared prefs`);
+	} catch (err) {
+		console.warn("Startup state refresh failed:", err);
+		setStartupState("unknown");
+		setStartupDetail("Failed to read native startup snapshot.");
+	}
+}
+
+function startStartupPolling() {
+	clearStartupPollTimer();
+	refreshStartupState();
+	startupPollTimer = window.setInterval(() => {
+		refreshStartupState();
+	}, 5000);
+}
+
 async function ensureAudioContextRunning() {
 	if (!started || !audioContext || audioContext.state === "running") return;
 
@@ -343,6 +428,10 @@ async function createAudioGraph() {
 		const displayFrames = msg.displayBufferedFrames ?? msg.bufferedFrames;
 		const ms = (displayFrames * 1000 / SAMPLE_RATE).toFixed(1);
 		setStats(`buffer=${ms}ms`);
+		setDataCell("diag-buffer", `${ms} ms`);
+		setDataCell("diag-drops", String(msg.droppedChunks));
+		setDataCell("diag-underflows", String(msg.underflows));
+		setDataCell("diag-received", String(msg.receivedChunks));
 		setStatsDetail(
 			`drops=${msg.droppedChunks}  underflows=${msg.underflows}  received=${msg.receivedChunks}`
 		);
@@ -354,6 +443,17 @@ async function createAudioGraph() {
 
 function updateConnectionUi(message, detail) {
 	setStatus(message);
+	setConnectionChip(message.toUpperCase());
+	const notification = document.getElementById("connection-notification");
+	if (notification) {
+		const kind =
+			message === "connected" ? "success" :
+			message === "error" || message === "socket error" ? "error" :
+			message === "reconnecting" ? "warning" :
+			"info";
+		notification.kind = kind;
+		notification.statusIconDescription = message;
+	}
 	if (detail) {
 		setStatusDetail(detail);
 	}
@@ -376,6 +476,8 @@ async function startAudioStream() {
 
 		await keepNativeBackgroundAudioAlive();
 		startResumeWatchdog();
+		startStartupPolling();
+		setActiveTab("overview");
 
 		connectWebSocket();
 	} catch (err) {
@@ -479,6 +581,7 @@ async function stopAudioStream() {
 	reconnectAttempts = 0;
 	clearReconnectTimer();
 	stopResumeWatchdog();
+	clearStartupPollTimer();
 
 	const socket = websocket;
 	websocket = null;
@@ -496,8 +599,8 @@ async function stopAudioStream() {
 		try {
 			workletNode.disconnect();
 		} catch (_) {}
-		workletNode = null;
-	}
+	workletNode = null;
+}
 
 	if (audioContext) {
 		try {
@@ -530,6 +633,7 @@ function handleAppResumed() {
 	keepNativeBackgroundAudioAlive();
 	ensureAudioContextRunning();
 	startResumeWatchdog();
+	startStartupPolling();
 
 	if (!websocket || websocket.readyState === WebSocket.CLOSED) {
 		scheduleReconnect();
@@ -543,56 +647,171 @@ class CapacitorWelcome extends HTMLElement {
 
 		this.innerHTML = `
 			<div class="app-shell">
-				<div class="ambient ambient-a"></div>
-				<div class="ambient ambient-b"></div>
-				<div class="ambient ambient-c"></div>
-
 				<main class="card">
-					<div class="card-topline">
-						<span class="eyebrow">Capacitor audio relay</span>
-						<span class="chip">loopback · adb reverse</span>
-					</div>
-
 					<header class="hero">
-						<p class="kicker">Audio Phone Speaker</p>
-						<h1>Controle um stream de áudio estável e silenciosamente persistente.</h1>
+						<div class="topbar">
+							<div>
+								<p class="eyebrow">Carbon Web Components demo</p>
+								<h1>Audio Phone Speaker</h1>
+							</div>
+							<div class="header-stacks">
+								<cds-tag type="green" size="sm">Carbon components</cds-tag>
+								<cds-tag id="connection-chip" type="cool-gray" size="sm">READY</cds-tag>
+							</div>
+						</div>
+
 						<p class="lede">
-							Recebe PCM 48 kHz do WebSocket local, mantém buffer, reage a pausas do Android
-							e evita a reconexão em cascata que travava o fluxo.
+							Relay local de áudio via WebSocket com componentes Carbon reais, mantendo o app e o
+							foreground service sincronizados no startup.
 						</p>
+
+						<cds-inline-notification
+							id="connection-notification"
+							kind="info"
+							low-contrast
+							hide-close-button
+							title="ready"
+							subtitle="Pronto para iniciar o stream.">
+						</cds-inline-notification>
+
+						<cds-tabs id="speaker-tabs">
+							<cds-tab selected data-audio-tab="overview">Overview</cds-tab>
+							<cds-tab data-audio-tab="diagnostics">Diagnostics</cds-tab>
+							<cds-tab data-audio-tab="controls">Controls</cds-tab>
+						</cds-tabs>
 					</header>
 
-					<section class="metrics">
-						<article class="metric metric-primary">
-							<span class="metric-label">Conexão</span>
-							<strong id="status">ready</strong>
-							<p id="status-detail">Pronto para iniciar o stream.</p>
-						</article>
+					<section class="dashboard">
+						<section class="tab-panel is-active" data-audio-panel="overview">
+							<div class="dashboard-overview">
+								<div class="panel">
+									<div class="tile-header">
+										<div>
+											<p class="metric-label">Stream route</p>
+											<strong>127.0.0.1:5001</strong>
+										</div>
+										<cds-tag type="blue" size="sm">WebSocket</cds-tag>
+									</div>
+									<p>ADB reverse + foreground service + AudioWorklet</p>
+									<div class="structured-list">
+										<div>
+											<span>App</span>
+											<strong id="startup-state">loading</strong>
+										</div>
+										<div>
+											<span>Service</span>
+											<strong id="startup-detail">Lendo snapshot nativo...</strong>
+										</div>
+									</div>
+								</div>
 
-						<article class="metric">
-							<span class="metric-label">Buffer</span>
-							<strong id="stats">-</strong>
-							<p id="stats-detail">Aguardando áudio.</p>
-						</article>
+								<div class="panel">
+									<div class="tile-header">
+										<div>
+											<p class="metric-label">Live status</p>
+											<strong id="buffer-value">-</strong>
+										</div>
+										<cds-tag type="teal" size="sm">buffer</cds-tag>
+									</div>
+									<p id="buffer-detail">Aguardando áudio.</p>
+									<div class="signal-rail" aria-hidden="true">
+										<span></span><span></span><span></span><span></span><span></span>
+									</div>
+								</div>
+							</div>
+						</section>
 
-						<article class="metric">
-							<span class="metric-label">Rota</span>
-							<strong>127.0.0.1:5001</strong>
-							<p>ADB reverse + serviço nativo em foreground</p>
-						</article>
+						<section class="tab-panel" data-audio-panel="diagnostics">
+							<div class="panel">
+								<div class="tile-header">
+									<div>
+										<p class="metric-label">Playback telemetry</p>
+										<strong>Data table</strong>
+									</div>
+									<cds-tag type="gray" size="sm">diagnostics</cds-tag>
+								</div>
+
+								<cds-table>
+									<cds-table-head>
+										<cds-table-row>
+											<cds-table-header-cell>Metric</cds-table-header-cell>
+											<cds-table-header-cell>Value</cds-table-header-cell>
+											<cds-table-header-cell>Meaning</cds-table-header-cell>
+										</cds-table-row>
+									</cds-table-head>
+									<cds-table-body>
+										<cds-table-row>
+											<cds-table-cell>Buffer</cds-table-cell>
+											<cds-table-cell id="diag-buffer">-</cds-table-cell>
+											<cds-table-cell>Buffered audio depth</cds-table-cell>
+										</cds-table-row>
+										<cds-table-row>
+											<cds-table-cell>Drops</cds-table-cell>
+											<cds-table-cell id="diag-drops">0</cds-table-cell>
+											<cds-table-cell>Chunks evicted from queue</cds-table-cell>
+										</cds-table-row>
+										<cds-table-row>
+											<cds-table-cell>Underflows</cds-table-cell>
+											<cds-table-cell id="diag-underflows">0</cds-table-cell>
+											<cds-table-cell>Silence inserted to preserve playback</cds-table-cell>
+										</cds-table-row>
+										<cds-table-row>
+											<cds-table-cell>Received</cds-table-cell>
+											<cds-table-cell id="diag-received">0</cds-table-cell>
+											<cds-table-cell>PCM chunks accepted by worklet</cds-table-cell>
+										</cds-table-row>
+									</cds-table-body>
+								</cds-table>
+
+								<cds-accordion size="sm">
+									<cds-accordion-item title="Startup state details">
+										Shared preferences keep the activity and foreground service aware of each other during boot,
+										resume, and forced restarts.
+									</cds-accordion-item>
+								</cds-accordion>
+							</div>
+						</section>
+
+						<section class="tab-panel" data-audio-panel="controls">
+							<div class="controls-grid">
+								<div class="panel">
+									<div class="tile-header">
+										<div>
+											<p class="metric-label">Primary actions</p>
+											<strong>Stream control</strong>
+										</div>
+										<cds-tag type="green" size="sm">always on demo</cds-tag>
+									</div>
+									<div class="controls">
+										<cds-button id="start" kind="primary" type="button">Start stream</cds-button>
+										<cds-button id="stop" kind="secondary" type="button">Stop stream</cds-button>
+									</div>
+								</div>
+
+								<div class="panel">
+									<div class="tile-header">
+										<div>
+											<p class="metric-label">Buffer state</p>
+											<strong id="stats">-</strong>
+										</div>
+										<cds-tag type="cool-gray" size="sm">inline loading</cds-tag>
+									</div>
+									<p id="stats-detail">Aguardando áudio.</p>
+								</div>
+							</div>
+						</section>
 					</section>
 
-					<section class="controls" aria-label="Audio controls">
-						<button id="start" type="button" class="btn btn-primary">Start stream</button>
-						<button id="stop" type="button" class="btn btn-secondary">Stop stream</button>
-					</section>
-
-					<div class="footnote">
-						Se a WebView oscilar, o app retoma sem abrir sockets duplicados.
-					</div>
+					<footer class="footnote">
+						Interface demo orientada a produção: componentes Carbon reais, estado claro e feedback legível.
+					</footer>
 				</main>
 			</div>
 		`;
+
+		this.querySelectorAll("[data-audio-tab]").forEach((tab) => {
+			tab.addEventListener("click", () => setActiveTab(tab.dataset.audioTab));
+		});
 
 		window.setTimeout(() => {
 			startAudioStream();
@@ -609,6 +828,7 @@ window.stopAudioStream = stopAudioStream;
 
 window.addEventListener("DOMContentLoaded", () => {
 	hideSplashScreen();
+	document.body.classList.add("cds--g10");
 
 	const startButton =
 		document.getElementById("start") ||
@@ -636,6 +856,8 @@ window.addEventListener("DOMContentLoaded", () => {
 		updateConnectionUi("ready", "Tap Start to open the local WebSocket.");
 		setStats("-");
 		setStatsDetail("Aguardando áudio.");
+		startStartupPolling();
+		setActiveTab("overview");
 	}
 });
 
