@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SERVICE_NAME="${AUDIO_SPEAKER_SERVICE_NAME:-audio-speaker}"
+SERVICE_NAME="${AUDIO_SPEAKER_SERVICE_NAME:-audio-phone-speaker}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 systemctl --user disable --now "$SERVICE_NAME.service" >/dev/null 2>&1 || true

@@ -23,8 +23,10 @@ public final class PhoneMicrophoneBridge {
     private static final String TAG = "PhoneMicrophoneBridge";
     private static final String HOST = "127.0.0.1";
     private static final int PORT = 5002;
-    private static final int SAMPLE_RATE = 16000;
+    private static final int SAMPLE_RATE = 48000;
     private static final int CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
+    private static final int MIC_CHUNK_MS = 20;
+    private static final int MIC_CHUNK_BYTES = SAMPLE_RATE * 2 * MIC_CHUNK_MS / 1000;
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
     private static final int TYPE_CONTROL = 1;
     private static final int TYPE_PCM = 2;
@@ -66,7 +68,11 @@ public final class PhoneMicrophoneBridge {
     }
 
     private void connectionLoop() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+        } catch (Throwable priorityError) {
+            Log.w(TAG, "Could not set audio thread priority", priorityError);
+        }
         while (running) {
             try (Socket connected = new Socket()) {
                 connected.setTcpNoDelay(true);
@@ -94,8 +100,8 @@ public final class PhoneMicrophoneBridge {
                         handleControl(new JSONObject(new String(payload, StandardCharsets.UTF_8)));
                     }
                 }
-            } catch (Exception error) {
-                if (running) Log.w(TAG, "Microphone bridge disconnected", error);
+            } catch (Throwable error) {
+                if (running) Log.e(TAG, "Microphone bridge failure; reconnecting", error);
             } finally {
                 stopRecording();
                 output = null;
@@ -136,7 +142,7 @@ public final class PhoneMicrophoneBridge {
         }
 
         int minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT);
-        int bufferSize = Math.max(minimum, SAMPLE_RATE * 2 / 5);
+        int bufferSize = Math.max(minimum * 2, SAMPLE_RATE * 2 * 80 / 1000);
         AudioRecord recorder = new AudioRecord.Builder()
             .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
             .setAudioFormat(new AudioFormat.Builder()
@@ -161,8 +167,12 @@ public final class PhoneMicrophoneBridge {
     }
 
     private void recordLoop(AudioRecord recorder, int bufferSize) {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
-        byte[] buffer = new byte[Math.max(2048, bufferSize / 2)];
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+        } catch (Throwable priorityError) {
+            Log.w(TAG, "Could not set record thread priority", priorityError);
+        }
+        byte[] buffer = new byte[MIC_CHUNK_BYTES];
         try {
             recorder.startRecording();
             sendStatus("recording", null);
@@ -174,7 +184,7 @@ public final class PhoneMicrophoneBridge {
                     throw new IllegalStateException("AudioRecord.read failed: " + count);
                 }
             }
-        } catch (Exception error) {
+        } catch (Throwable error) {
             Log.e(TAG, "Microphone capture failed", error);
             sendStatus("error", error.getMessage());
         } finally {

@@ -1,5 +1,3 @@
-numpy
-soundcard
-websockets
-sounddevice
-aiohttp
+numpy>=1.24
+soundcard>=0.4.3; sys_platform == "linux"
+PyAudioWPatch>=0.2.12.8; sys_platform == "win32"

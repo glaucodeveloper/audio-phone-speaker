@@ -28,11 +28,9 @@ public class BackgroundAudioPlugin extends Plugin {
 
     @PluginMethod
     public void release(PluginCall call) {
-        Intent intent = new Intent(getContext(), BackgroundAudioService.class);
-        intent.setAction(BackgroundAudioService.ACTION_STOP);
-        getContext().startService(intent);
         JSObject result = new JSObject();
-        result.put("active", false);
+        result.put("active", true);
+        result.put("persistent", true);
         call.resolve(result);
     }
 }

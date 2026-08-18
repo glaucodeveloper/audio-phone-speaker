@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-SERVICE_NAME="${AUDIO_SPEAKER_SERVICE_NAME:-audio-speaker}"
+SERVICE_NAME="${AUDIO_SPEAKER_SERVICE_NAME:-audio-phone-speaker}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_FILE="$UNIT_DIR/$SERVICE_NAME.service"
 ENV_FILE="$PROJECT_DIR/.audio-speaker.env"
@@ -24,24 +24,21 @@ fi
 
 "$PROJECT_DIR/.venv/bin/python" -m pip install --upgrade pip wheel setuptools
 "$PROJECT_DIR/.venv/bin/python" -m pip install -r "$PROJECT_DIR/requirements-audio-sender.txt"
+
 "$PROJECT_DIR/.venv/bin/python" - <<'PY'
 import numpy
 import soundcard
-import sounddevice
-import websockets
-print("Dependências Python: OK")
+print("Dependências Python Linux: OK")
 PY
 
 cat > "$ENV_FILE" <<'EOF'
 PYTHONUNBUFFERED=1
+PHONE_MIC_VIRTUAL_ENABLED=1
 PHONE_MIC_SET_DEFAULT=1
-PHONE_MIC_SOURCE_NAME=glauco_phone_mic
-PHONE_MIC_DESCRIPTION="Glauco Phone Microphone"
-PHONE_MIC_SAMPLE_RATE=16000
+PHONE_MIC_SOURCE_NAME=audio_phone_speaker_mic
+PHONE_MIC_DESCRIPTION="Audio Phone Microphone"
+PHONE_MIC_SAMPLE_RATE=48000
 PHONE_MIC_CHANNELS=1
-PHONE_SPEAKER_PORT=5001
-PHONE_MIC_PORT=5002
-PHONE_MIC_CONTROL_PORT=5003
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -57,7 +54,7 @@ mkdir -p "$UNIT_DIR"
 
 cat > "$UNIT_FILE" <<UNIT
 [Unit]
-Description=Glauco Audio Phone Speaker and Microphone Bridge
+Description=Audio Phone Speaker duplex bridge
 After=graphical-session.target pipewire.service pipewire-pulse.service
 Wants=graphical-session.target pipewire.service pipewire-pulse.service
 StartLimitIntervalSec=30
@@ -86,10 +83,6 @@ StandardError=journal
 WantedBy=default.target
 UNIT
 
-# Remove the older unit name if it exists, so only one process owns ports 5001-5003.
-systemctl --user disable --now audio-phone-speaker.service >/dev/null 2>&1 || true
-rm -f "$UNIT_DIR/audio-phone-speaker.service"
-
 systemctl --user daemon-reload
 systemctl --user reset-failed "$SERVICE_NAME.service" >/dev/null 2>&1 || true
 systemctl --user enable --now "$SERVICE_NAME.service"
@@ -98,4 +91,4 @@ sleep 2
 printf '\n'
 systemctl --user status "$SERVICE_NAME.service" --no-pager --full || true
 printf '\nLogs:\n  journalctl --user -u %s.service -f\n' "$SERVICE_NAME"
-printf 'Microfone:\n  pactl list sources short | grep glauco_phone_mic\n'
+printf 'Microfone:\n  pactl list sources short | grep audio_phone_speaker_mic\n'

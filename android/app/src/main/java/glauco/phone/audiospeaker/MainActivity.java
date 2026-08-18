@@ -3,12 +3,8 @@ package glauco.phone.audiospeaker;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.PowerManager;
-import android.provider.Settings;
-import android.webkit.WebView;
 
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
@@ -26,28 +22,15 @@ public class MainActivity extends BridgeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         registerPlugin(BackgroundAudioPlugin.class);
         super.onCreate(savedInstanceState);
-        configureWebViewAudio();
-        requestBatteryOptimizationExemptionIfNeeded();
         requestPermissionsAndStartService();
-    }
-
-    @Override
-    public void onPause() {
-        configureWebViewAudio();
-        if (bridge != null && bridge.getWebView() != null) {
-            bridge.getWebView().onWindowFocusChanged(true);
-        }
-        super.onPause();
     }
 
     @Override
     public void onResume() {
         super.onResume();
-        configureWebViewAudio();
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) {
-            startBackgroundAudioService();
-        }
+        boolean micGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED;
+        startBackgroundAudioService(micGranted);
     }
 
     @Override
@@ -58,15 +41,10 @@ public class MainActivity extends BridgeActivity {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_RUNTIME_PERMISSIONS) {
-            // Speaker mode remains available even if microphone permission was denied.
-            startBackgroundAudioService();
+            boolean micGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+            startBackgroundAudioService(micGranted);
         }
-    }
-
-    private void configureWebViewAudio() {
-        if (bridge == null || bridge.getWebView() == null) return;
-        WebView webView = bridge.getWebView();
-        webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
     }
 
     private void requestPermissionsAndStartService() {
@@ -82,8 +60,9 @@ public class MainActivity extends BridgeActivity {
         }
 
         if (missing.isEmpty()) {
-            startBackgroundAudioService();
+            startBackgroundAudioService(true);
         } else {
+            startBackgroundAudioService(false);
             ActivityCompat.requestPermissions(
                 this,
                 missing.toArray(new String[0]),
@@ -92,22 +71,12 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    private void startBackgroundAudioService() {
+    private void startBackgroundAudioService(boolean duplex) {
         Intent intent = new Intent(this, BackgroundAudioService.class);
-        intent.setAction(BackgroundAudioService.ACTION_START_DUPLEX);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
-    }
-
-    private void requestBatteryOptimizationExemptionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-        PowerManager manager = getSystemService(PowerManager.class);
-        if (manager == null || manager.isIgnoringBatteryOptimizations(getPackageName())) return;
-        Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-        intent.setData(Uri.parse("package:" + getPackageName()));
-        if (intent.resolveActivity(getPackageManager()) != null) startActivity(intent);
+        intent.setAction(duplex
+            ? BackgroundAudioService.ACTION_START_DUPLEX
+            : BackgroundAudioService.ACTION_START);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent);
+        else startService(intent);
     }
 }

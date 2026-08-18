@@ -1,886 +1,176 @@
-// main.js
-// Cliente WebSocket PCM 16-bit LE stereo 48 kHz para Capacitor/WebView.
-// Para USB via ADB, rode no PC:
-//   adb reverse tcp:5001 tcp:5001
-// Depois conecte em:
-//   ws://127.0.0.1:5001
-
-import "@carbon/styles/css/styles.css";
-import "@carbon/web-components/es/components/button/index.js";
-import "@carbon/web-components/es/components/tabs/index.js";
-import "@carbon/web-components/es/components/accordion/index.js";
-import "@carbon/web-components/es/components/tag/index.js";
-import "@carbon/web-components/es/components/notification/index.js";
-import "@carbon/web-components/es/components/data-table/index.js";
-
-const WS_URL = "ws://127.0.0.1:5001";
-
+const SPEAKER_PORT = 5001;
+const MIC_PORT = 5002;
 const SAMPLE_RATE = 48000;
-const CHANNELS = 2;
 
-// 2400 frames = 50 ms em 48 kHz.
-// 4800 frames = 100 ms em 48 kHz.
-const TARGET_BUFFERED_FRAMES = 2400;
-const MAX_BUFFERED_FRAMES = 4800;
-const START_BUFFERED_FRAMES = 2400;
+function backgroundAudioPlugin() {
+  return window.Capacitor?.Plugins?.BackgroundAudio;
+}
 
-let audioContext = null;
-let workletNode = null;
-let websocket = null;
-let started = false;
-let resumeTimer = null;
-let reconnectTimer = null;
-let backgroundKeepAliveEnabled = false;
-let userStopped = false;
-let reconnectAttempts = 0;
-let connectionToken = 0;
-let startupPollTimer = null;
+function setText(id, text) {
+  const element = document.getElementById(id);
+  if (element) element.textContent = text;
+}
 
-const RECONNECT_BASE_DELAY = 1000;
-const RECONNECT_MAX_DELAY = 10000;
+function setState(state, detail = "") {
+  setText("bridge-state", state);
+  setText("bridge-detail", detail);
+}
 
-const workletSource = `
-class PCMPlayerProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
+async function hideSplash() {
+  const splash = window.Capacitor?.Plugins?.SplashScreen;
+  if (!splash?.hide) return;
 
-    this.channels = options.processorOptions.channels || 2;
-    this.targetBufferedFrames = options.processorOptions.targetBufferedFrames || 960;
-    this.maxBufferedFrames = options.processorOptions.maxBufferedFrames || 2400;
-    this.startBufferedFrames = options.processorOptions.startBufferedFrames || 960;
-
-    this.queue = [];
-    this.readFrameOffset = 0;
-
-    this.underflows = 0;
-    this.droppedChunks = 0;
-    this.receivedChunks = 0;
-    this.processedFrames = 0;
-    this.playbackStarted = false;
-    this.inUnderflow = false;
-    this.smoothedBufferedFrames = 0;
-
-    this.port.onmessage = (event) => {
-      if (event.data && event.data.type === "reset") {
-        this.queue = [];
-        this.readFrameOffset = 0;
-        this.playbackStarted = false;
-        this.inUnderflow = false;
-        this.smoothedBufferedFrames = 0;
-        return;
-      }
-
-      const arrayBuffer = event.data;
-      if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
-
-      const pcm = new Int16Array(arrayBuffer);
-      this.queue.push(pcm);
-      this.receivedChunks++;
-
-      this.dropOldAudioIfNeeded();
-    };
-  }
-
-  bufferedFrames() {
-    let frames = -this.readFrameOffset;
-
-    for (let i = 0; i < this.queue.length; i++) {
-      frames += Math.floor(this.queue[i].length / this.channels);
-    }
-
-    return frames;
-  }
-
-  dropOldAudioIfNeeded() {
-    let frames = this.bufferedFrames();
-
-    if (frames <= this.maxBufferedFrames) return;
-
-    while (this.queue.length > 1 && frames > this.targetBufferedFrames) {
-      const dropped = this.queue.shift();
-      frames -= Math.floor(dropped.length / this.channels);
-      this.readFrameOffset = 0;
-      this.droppedChunks++;
-    }
-
-    this.port.postMessage({
-      type: "stats",
-      bufferedFrames: frames,
-      droppedChunks: this.droppedChunks,
-      underflows: this.underflows,
-      receivedChunks: this.receivedChunks
-    });
-  }
-
-  postStatsIfNeeded(renderedFrames) {
-    this.processedFrames += renderedFrames;
-    if (this.processedFrames < sampleRate / 2) return;
-
-    this.processedFrames = 0;
-    const buffered = this.bufferedFrames();
-    this.smoothedBufferedFrames = this.smoothedBufferedFrames === 0
-      ? buffered
-      : Math.round((this.smoothedBufferedFrames * 0.7) + (buffered * 0.3));
-
-    this.port.postMessage({
-      type: "stats",
-      bufferedFrames: buffered,
-      displayBufferedFrames: this.smoothedBufferedFrames,
-      droppedChunks: this.droppedChunks,
-      underflows: this.underflows,
-      receivedChunks: this.receivedChunks
-    });
-  }
-
-  process(inputs, outputs) {
-    const output = outputs[0];
-    const left = output[0];
-    const right = output[1] || output[0];
-    const bufferedAtStart = this.bufferedFrames();
-
-    if (!this.playbackStarted) {
-      if (bufferedAtStart < this.startBufferedFrames) {
-        left.fill(0);
-        right.fill(0);
-        this.postStatsIfNeeded(left.length);
-        return true;
-      }
-      this.playbackStarted = true;
-    }
-
-    for (let i = 0; i < left.length; i++) {
-      if (this.queue.length === 0) {
-        left[i] = 0;
-        right[i] = 0;
-        if (this.playbackStarted && !this.inUnderflow) {
-          this.underflows++;
-          this.inUnderflow = true;
-          this.playbackStarted = false;
-        }
-        continue;
-      }
-
-      this.inUnderflow = false;
-      const chunk = this.queue[0];
-      const base = this.readFrameOffset * this.channels;
-
-      if (base >= chunk.length) {
-        this.queue.shift();
-        this.readFrameOffset = 0;
-        i--;
-        continue;
-      }
-
-      const l = chunk[base] / 32768.0;
-      const r = this.channels >= 2 && base + 1 < chunk.length
-        ? chunk[base + 1] / 32768.0
-        : l;
-
-      left[i] = l;
-      right[i] = r;
-
-      this.readFrameOffset++;
-
-      if (this.readFrameOffset >= Math.floor(chunk.length / this.channels)) {
-        this.queue.shift();
-        this.readFrameOffset = 0;
-      }
-    }
-
-    this.postStatsIfNeeded(left.length);
-    return true;
+  try {
+    await splash.hide();
+  } catch (error) {
+    console.warn("Splash hide failed:", error);
   }
 }
 
-registerProcessor("pcm-player", PCMPlayerProcessor);
-`;
-
-function setStatus(text) {
-	const el = document.getElementById("connection-notification");
-	if (el) el.title = text;
-	console.log(text);
-}
-
-function setStatusDetail(text) {
-	const el = document.getElementById("connection-notification");
-	if (el) el.subtitle = text;
-}
-
-function setConnectionChip(text) {
-	const el = document.getElementById("connection-chip");
-	if (el) el.textContent = text;
-}
-
-function setDataCell(id, text) {
-	const el = document.getElementById(id);
-	if (el) el.textContent = text;
-}
-
-function setStats(text) {
-	const el = document.getElementById("buffer-value");
-	if (el) el.textContent = text;
-}
-
-function setStatsDetail(text) {
-	const el = document.getElementById("buffer-detail");
-	if (el) el.textContent = text;
-}
-
-function setStartupState(text) {
-	const el = document.getElementById("startup-state");
-	if (el) el.textContent = text;
-}
-
-function setStartupDetail(text) {
-	const el = document.getElementById("startup-detail");
-	if (el) el.textContent = text;
-}
-
-function setActiveTab(tabName) {
-	const tabs = document.querySelectorAll("[data-audio-tab]");
-	const panels = document.querySelectorAll("[data-audio-panel]");
-
-	tabs.forEach((tab) => {
-		const active = tab.dataset.audioTab === tabName;
-		tab.toggleAttribute("selected", active);
-		tab.classList.toggle("is-active", active);
-	});
-
-	panels.forEach((panel) => {
-		const active = panel.dataset.audioPanel === tabName;
-		panel.classList.toggle("is-active", active);
-	});
-}
-
-function clearStartupPollTimer() {
-	if (!startupPollTimer) return;
-	window.clearInterval(startupPollTimer);
-	startupPollTimer = null;
-}
-
-function clearReconnectTimer() {
-	if (!reconnectTimer) return;
-	window.clearTimeout(reconnectTimer);
-	reconnectTimer = null;
-}
-
-function sendPlaybackStats(msg) {
-	if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
-
-	try {
-		websocket.send(JSON.stringify({
-			type: "playbackStats",
-			bufferedFrames: msg.bufferedFrames,
-			droppedChunks: msg.droppedChunks,
-			underflows: msg.underflows,
-			receivedChunks: msg.receivedChunks
-		}));
-	} catch (err) {
-		console.warn("Playback stats send failed:", err);
-	}
-}
-
-function resetPlaybackBuffer() {
-	if (!workletNode) return;
-
-	try {
-		workletNode.port.postMessage({ type: "reset" });
-	} catch (err) {
-		console.warn("Playback reset failed:", err);
-	}
-}
-
-async function hideSplashScreen() {
-	const splashScreen = window.Capacitor?.Plugins?.SplashScreen;
-	if (!splashScreen?.hide) return;
-
-	try {
-		await splashScreen.hide();
-	} catch (err) {
-		console.warn("Splash hide failed:", err);
-	}
-}
-
-async function keepNativeBackgroundAudioAlive() {
-	const plugin = window.Capacitor?.Plugins?.BackgroundAudio;
-	if (!plugin?.keepAlive) return;
-	if (backgroundKeepAliveEnabled) return;
-
-	try {
-		await plugin.keepAlive();
-		backgroundKeepAliveEnabled = true;
-	} catch (err) {
-		console.warn("Background keep-alive failed:", err);
-	}
-}
-
-async function releaseNativeBackgroundAudio() {
-	const plugin = window.Capacitor?.Plugins?.BackgroundAudio;
-	if (!plugin?.release) return;
-
-	try {
-		await plugin.release();
-	} catch (err) {
-		console.warn("Background release failed:", err);
-	} finally {
-		backgroundKeepAliveEnabled = false;
-	}
-}
-
-function formatStartupState(snapshot) {
-	const appState = snapshot?.appForeground ? "foreground" : "background";
-	const serviceState = snapshot?.serviceRunning ? "running" : "stopped";
-	const lastSource = snapshot?.lastSource || "unknown";
-	return `app=${appState} service=${serviceState}`;
-}
-
-async function refreshStartupState() {
-	const plugin = window.Capacitor?.Plugins?.BackgroundAudio;
-	if (!plugin?.getStartupState) {
-		setStartupState("unavailable");
-		setStartupDetail("Native startup snapshot unavailable.");
-		return;
-	}
-
-	try {
-		const snapshot = await plugin.getStartupState();
-		setStartupState(formatStartupState(snapshot));
-		setStartupDetail(`last=${snapshot?.lastSource || "unknown"} · bridge=shared prefs`);
-	} catch (err) {
-		console.warn("Startup state refresh failed:", err);
-		setStartupState("unknown");
-		setStartupDetail("Failed to read native startup snapshot.");
-	}
-}
-
-function startStartupPolling() {
-	clearStartupPollTimer();
-	refreshStartupState();
-	startupPollTimer = window.setInterval(() => {
-		refreshStartupState();
-	}, 5000);
-}
-
-async function ensureAudioContextRunning() {
-	if (!started || !audioContext || audioContext.state === "running") return;
-
-	try {
-		await audioContext.resume();
-	} catch (err) {
-		console.warn("AudioContext resume failed:", err);
-	}
-}
-
-function startResumeWatchdog() {
-	stopResumeWatchdog();
-	resumeTimer = window.setInterval(() => {
-		ensureAudioContextRunning();
-	}, 2000);
-}
-
-function stopResumeWatchdog() {
-	if (!resumeTimer) return;
-	window.clearInterval(resumeTimer);
-	resumeTimer = null;
-}
-
-async function createAudioGraph() {
-	audioContext = new AudioContext({
-		sampleRate: SAMPLE_RATE,
-		latencyHint: "interactive"
-	});
-
-	audioContext.onstatechange = () => {
-		if (started && audioContext.state === "suspended") {
-			ensureAudioContextRunning();
-		}
-	};
-
-	if (audioContext.state !== "running") {
-		await audioContext.resume();
-	}
-
-	const blob = new Blob([workletSource], { type: "application/javascript" });
-	const workletUrl = URL.createObjectURL(blob);
-
-	try {
-		await audioContext.audioWorklet.addModule(workletUrl);
-	} finally {
-		URL.revokeObjectURL(workletUrl);
-	}
-
-	workletNode = new AudioWorkletNode(audioContext, "pcm-player", {
-		numberOfInputs: 0,
-		numberOfOutputs: 1,
-		outputChannelCount: [CHANNELS],
-		processorOptions: {
-			channels: CHANNELS,
-			targetBufferedFrames: TARGET_BUFFERED_FRAMES,
-			maxBufferedFrames: MAX_BUFFERED_FRAMES,
-			startBufferedFrames: START_BUFFERED_FRAMES
-		}
-	});
-
-	workletNode.port.onmessage = (event) => {
-		const msg = event.data;
-		if (!msg || msg.type !== "stats") return;
-
-		const displayFrames = msg.displayBufferedFrames ?? msg.bufferedFrames;
-		const ms = (displayFrames * 1000 / SAMPLE_RATE).toFixed(1);
-		setStats(`buffer=${ms}ms`);
-		setDataCell("diag-buffer", `${ms} ms`);
-		setDataCell("diag-drops", String(msg.droppedChunks));
-		setDataCell("diag-underflows", String(msg.underflows));
-		setDataCell("diag-received", String(msg.receivedChunks));
-		setStatsDetail(
-			`drops=${msg.droppedChunks}  underflows=${msg.underflows}  received=${msg.receivedChunks}`
-		);
-		sendPlaybackStats(msg);
-	};
-
-	workletNode.connect(audioContext.destination);
-}
-
-function updateConnectionUi(message, detail) {
-	setStatus(message);
-	setConnectionChip(message.toUpperCase());
-	const notification = document.getElementById("connection-notification");
-	if (notification) {
-		const kind =
-			message === "connected" ? "success" :
-			message === "error" || message === "socket error" ? "error" :
-			message === "reconnecting" ? "warning" :
-			"info";
-		notification.kind = kind;
-		notification.statusIconDescription = message;
-	}
-	if (detail) {
-		setStatusDetail(detail);
-	}
-}
-
-async function startAudioStream() {
-	if (started) return;
-
-	userStopped = false;
-	started = true;
-	reconnectAttempts = 0;
-	clearReconnectTimer();
-
-	try {
-		updateConnectionUi("starting", "Prepping audio graph and opening the socket.");
-
-		if (!audioContext) {
-			await createAudioGraph();
-		}
-
-		await keepNativeBackgroundAudioAlive();
-		startResumeWatchdog();
-		startStartupPolling();
-		setActiveTab("overview");
-
-		connectWebSocket();
-	} catch (err) {
-		console.error(err);
-		updateConnectionUi("error", err.message || String(err));
-		started = false;
-		await stopAudioStream();
-	}
-}
-
-function connectWebSocket() {
-	if (!started || userStopped) return;
-
-	clearReconnectTimer();
-
-	const currentToken = ++connectionToken;
-	const previousSocket = websocket;
-	websocket = null;
-
-	if (previousSocket) {
-		try {
-			previousSocket.onopen = null;
-			previousSocket.onmessage = null;
-			previousSocket.onerror = null;
-			previousSocket.onclose = null;
-			previousSocket.close();
-		} catch (_) {}
-	}
-
-	const socket = new WebSocket(WS_URL);
-	websocket = socket;
-	socket.binaryType = "arraybuffer";
-
-	updateConnectionUi("connecting", `Attempting ${WS_URL}`);
-
-	socket.onopen = () => {
-		if (websocket !== socket || currentToken !== connectionToken) return;
-
-		reconnectAttempts = 0;
-		clearReconnectTimer();
-		updateConnectionUi("connected", `Stream live through ${WS_URL}`);
-		resetPlaybackBuffer();
-		ensureAudioContextRunning();
-	};
-
-	socket.onmessage = (event) => {
-		if (websocket !== socket || currentToken !== connectionToken) return;
-		if (!(event.data instanceof ArrayBuffer)) return;
-
-		if (!workletNode) {
-			return;
-		}
-
-		ensureAudioContextRunning();
-		workletNode.port.postMessage(event.data, [event.data]);
-	};
-
-	socket.onerror = (err) => {
-		if (websocket !== socket || currentToken !== connectionToken) return;
-		console.error("WebSocket error:", err);
-		updateConnectionUi("socket error", "Waiting for the reconnect cycle.");
-	};
-
-	socket.onclose = () => {
-		if (websocket !== socket || currentToken !== connectionToken) return;
-
-		websocket = null;
-		resetPlaybackBuffer();
-
-		if (userStopped || !started) {
-			updateConnectionUi("stopped", "Stream halted locally.");
-			return;
-		}
-
-		scheduleReconnect();
-	};
-}
-
-function scheduleReconnect() {
-	if (userStopped || !started) return;
-	if (reconnectTimer) return;
-
-	reconnectAttempts++;
-	const delay = Math.min(RECONNECT_BASE_DELAY * reconnectAttempts, RECONNECT_MAX_DELAY);
-	updateConnectionUi("reconnecting", `Retry in ${delay}ms. Attempt ${reconnectAttempts}.`);
-
-	reconnectTimer = window.setTimeout(() => {
-		reconnectTimer = null;
-
-		if (userStopped || !started) return;
-
-		ensureAudioContextRunning();
-		keepNativeBackgroundAudioAlive();
-		connectWebSocket();
-	}, delay);
-}
-
-async function stopAudioStream() {
-	userStopped = true;
-	started = false;
-	reconnectAttempts = 0;
-	clearReconnectTimer();
-	stopResumeWatchdog();
-	clearStartupPollTimer();
-
-	const socket = websocket;
-	websocket = null;
-	if (socket) {
-		try {
-			socket.onopen = null;
-			socket.onmessage = null;
-			socket.onerror = null;
-			socket.onclose = null;
-			socket.close();
-		} catch (_) {}
-	}
-
-	if (workletNode) {
-		try {
-			workletNode.disconnect();
-		} catch (_) {}
-	workletNode = null;
-}
-
-	if (audioContext) {
-		try {
-			await audioContext.close();
-		} catch (_) {}
-		audioContext = null;
-	}
-
-	await releaseNativeBackgroundAudio();
-	updateConnectionUi("stopped", "Tap Start to reconnect.");
-}
-
-function handleAppPaused() {
-	if (!started) return;
-
-	// Em background, o Android pode suspender a WebView; mantemos o serviço nativo vivo
-	// e tentamos manter o contexto de áudio pronto para retomar imediatamente.
-	keepNativeBackgroundAudioAlive();
-	ensureAudioContextRunning();
-}
-
-function handleAppResumed() {
-	if (!started && !userStopped) {
-		startAudioStream();
-		return;
-	}
-
-	if (!started) return;
-
-	keepNativeBackgroundAudioAlive();
-	ensureAudioContextRunning();
-	startResumeWatchdog();
-	startStartupPolling();
-
-	if (!websocket || websocket.readyState === WebSocket.CLOSED) {
-		scheduleReconnect();
-	}
+async function keepNativeBridgeAlive() {
+  const plugin = backgroundAudioPlugin();
+
+  if (!plugin?.keepAlive) {
+    setState(
+      "plugin indisponível",
+      "BackgroundAudio não foi registrado no runtime Capacitor."
+    );
+    return;
+  }
+
+  setState(
+    "ativando",
+    "Iniciando foreground service nativo."
+  );
+
+  try {
+    await plugin.keepAlive();
+
+    setState(
+      "ativo",
+      "AudioTrack + AudioRecord conectam diretamente às portas ADB reverse."
+    );
+  } catch (error) {
+    console.error("BackgroundAudio.keepAlive failed:", error);
+
+    setState(
+      "erro",
+      error?.message || String(error)
+    );
+  }
 }
 
 class CapacitorWelcome extends HTMLElement {
-	connectedCallback() {
-		if (this.dataset.rendered === "true") return;
-		this.dataset.rendered = "true";
+  connectedCallback() {
+    this.innerHTML = `
+      <main class="app-shell">
+        <section class="card">
+          <header class="hero">
+            <div class="topbar">
+              <div>
+                <p class="eyebrow">Android / Capacitor</p>
+                <h1>Audio Phone Speaker</h1>
+              </div>
+              <div class="header-stacks">
+                <span class="native-tag">Native TCP</span>
+                <span class="native-tag">48 kHz</span>
+                <span class="native-tag">Full duplex</span>
+              </div>
+            </div>
 
-		this.innerHTML = `
-			<div class="app-shell">
-				<main class="card">
-					<header class="hero">
-						<div class="topbar">
-							<div>
-								<p class="eyebrow">Carbon Web Components demo</p>
-								<h1>Audio Phone Speaker</h1>
-							</div>
-							<div class="header-stacks">
-								<cds-tag type="green" size="sm">Carbon components</cds-tag>
-								<cds-tag id="connection-chip" type="cool-gray" size="sm">READY</cds-tag>
-							</div>
-						</div>
+            <p class="lede">
+              O WebView funciona apenas como interface. O áudio é tratado
+              nativamente pelo foreground service Android: AudioTrack recebe
+              o som do computador e AudioRecord envia o microfone do telefone.
+            </p>
+          </header>
 
-						<p class="lede">
-							Relay local de áudio via WebSocket com componentes Carbon reais, mantendo o app e o
-							foreground service sincronizados no startup.
-						</p>
+          <section class="dashboard-overview">
+            <article class="panel">
+              <div class="tile-header">
+                <div>
+                  <p class="metric-label">Estado</p>
+                  <strong id="bridge-state">iniciando</strong>
+                </div>
+              </div>
 
-						<cds-inline-notification
-							id="connection-notification"
-							kind="info"
-							low-contrast
-							hide-close-button
-							title="ready"
-							subtitle="Pronto para iniciar o stream.">
-						</cds-inline-notification>
+              <p id="bridge-detail">
+                Solicitando o foreground service.
+              </p>
 
-						<cds-tabs id="speaker-tabs">
-							<cds-tab selected data-audio-tab="overview">Overview</cds-tab>
-							<cds-tab data-audio-tab="diagnostics">Diagnostics</cds-tab>
-							<cds-tab data-audio-tab="controls">Controls</cds-tab>
-						</cds-tabs>
-					</header>
+              <div class="structured-list">
+                <div>
+                  <span>PC → telefone</span>
+                  <strong>TCP ${SPEAKER_PORT}</strong>
+                </div>
+                <div>
+                  <span>Telefone → PC</span>
+                  <strong>TCP ${MIC_PORT}</strong>
+                </div>
+                <div>
+                  <span>Speaker</span>
+                  <strong>${SAMPLE_RATE} Hz / stereo / PCM16</strong>
+                </div>
+                <div>
+                  <span>Microfone</span>
+                  <strong>${SAMPLE_RATE} Hz / mono / PCM16</strong>
+                </div>
+              </div>
+            </article>
 
-					<section class="dashboard">
-						<section class="tab-panel is-active" data-audio-panel="overview">
-							<div class="dashboard-overview">
-								<div class="panel">
-									<div class="tile-header">
-										<div>
-											<p class="metric-label">Stream route</p>
-											<strong>127.0.0.1:5001</strong>
-										</div>
-										<cds-tag type="blue" size="sm">WebSocket</cds-tag>
-									</div>
-									<p>ADB reverse + foreground service + AudioWorklet</p>
-									<div class="structured-list">
-										<div>
-											<span>App</span>
-											<strong id="startup-state">loading</strong>
-										</div>
-										<div>
-											<span>Service</span>
-											<strong id="startup-detail">Lendo snapshot nativo...</strong>
-										</div>
-									</div>
-								</div>
+            <article class="panel">
+              <p class="metric-label">Transporte</p>
+              <strong>ADB reverse + foreground service</strong>
+              <p>
+                Não existe WebSocket ou AudioWorklet no caminho de áudio.
+                O Java nativo reconecta automaticamente a
+                <code>127.0.0.1</code>.
+              </p>
 
-								<div class="panel">
-									<div class="tile-header">
-										<div>
-											<p class="metric-label">Live status</p>
-											<strong id="buffer-value">-</strong>
-										</div>
-										<cds-tag type="teal" size="sm">buffer</cds-tag>
-									</div>
-									<p id="buffer-detail">Aguardando áudio.</p>
-									<div class="signal-rail" aria-hidden="true">
-										<span></span><span></span><span></span><span></span><span></span>
-									</div>
-								</div>
-							</div>
-						</section>
+              <div class="controls">
+                <button id="reconnect-button" class="native-button" type="button">
+                  Reativar ponte
+                </button>
+              </div>
+            </article>
+          </section>
 
-						<section class="tab-panel" data-audio-panel="diagnostics">
-							<div class="panel">
-								<div class="tile-header">
-									<div>
-										<p class="metric-label">Playback telemetry</p>
-										<strong>Data table</strong>
-									</div>
-									<cds-tag type="gray" size="sm">diagnostics</cds-tag>
-								</div>
+          <p class="footnote">
+            Mantenha a depuração USB autorizada. O processo Python no computador
+            configura <code>adb reverse tcp:5001</code> e
+            <code>adb reverse tcp:5002</code>.
+          </p>
+        </section>
+      </main>
+    `;
 
-								<cds-table>
-									<cds-table-head>
-										<cds-table-row>
-											<cds-table-header-cell>Metric</cds-table-header-cell>
-											<cds-table-header-cell>Value</cds-table-header-cell>
-											<cds-table-header-cell>Meaning</cds-table-header-cell>
-										</cds-table-row>
-									</cds-table-head>
-									<cds-table-body>
-										<cds-table-row>
-											<cds-table-cell>Buffer</cds-table-cell>
-											<cds-table-cell id="diag-buffer">-</cds-table-cell>
-											<cds-table-cell>Buffered audio depth</cds-table-cell>
-										</cds-table-row>
-										<cds-table-row>
-											<cds-table-cell>Drops</cds-table-cell>
-											<cds-table-cell id="diag-drops">0</cds-table-cell>
-											<cds-table-cell>Chunks evicted from queue</cds-table-cell>
-										</cds-table-row>
-										<cds-table-row>
-											<cds-table-cell>Underflows</cds-table-cell>
-											<cds-table-cell id="diag-underflows">0</cds-table-cell>
-											<cds-table-cell>Silence inserted to preserve playback</cds-table-cell>
-										</cds-table-row>
-										<cds-table-row>
-											<cds-table-cell>Received</cds-table-cell>
-											<cds-table-cell id="diag-received">0</cds-table-cell>
-											<cds-table-cell>PCM chunks accepted by worklet</cds-table-cell>
-										</cds-table-row>
-									</cds-table-body>
-								</cds-table>
+    document
+      .getElementById("reconnect-button")
+      ?.addEventListener(
+        "click",
+        () => keepNativeBridgeAlive()
+      );
 
-								<cds-accordion size="sm">
-									<cds-accordion-item title="Startup state details">
-										Shared preferences keep the activity and foreground service aware of each other during boot,
-										resume, and forced restarts.
-									</cds-accordion-item>
-								</cds-accordion>
-							</div>
-						</section>
-
-						<section class="tab-panel" data-audio-panel="controls">
-							<div class="controls-grid">
-								<div class="panel">
-									<div class="tile-header">
-										<div>
-											<p class="metric-label">Primary actions</p>
-											<strong>Stream control</strong>
-										</div>
-										<cds-tag type="green" size="sm">always on demo</cds-tag>
-									</div>
-									<div class="controls">
-										<cds-button id="start" kind="primary" type="button">Start stream</cds-button>
-										<cds-button id="stop" kind="secondary" type="button">Stop stream</cds-button>
-									</div>
-								</div>
-
-								<div class="panel">
-									<div class="tile-header">
-										<div>
-											<p class="metric-label">Buffer state</p>
-											<strong id="stats">-</strong>
-										</div>
-										<cds-tag type="cool-gray" size="sm">inline loading</cds-tag>
-									</div>
-									<p id="stats-detail">Aguardando áudio.</p>
-								</div>
-							</div>
-						</section>
-					</section>
-
-					<footer class="footnote">
-						Interface demo orientada a produção: componentes Carbon reais, estado claro e feedback legível.
-					</footer>
-				</main>
-			</div>
-		`;
-
-		this.querySelectorAll("[data-audio-tab]").forEach((tab) => {
-			tab.addEventListener("click", () => setActiveTab(tab.dataset.audioTab));
-		});
-
-		window.setTimeout(() => {
-			startAudioStream();
-		}, 0);
-	}
+    hideSplash();
+    keepNativeBridgeAlive();
+  }
 }
 
-if (!customElements.get("capacitor-welcome")) {
-	customElements.define("capacitor-welcome", CapacitorWelcome);
-}
+customElements.define(
+  "capacitor-welcome",
+  CapacitorWelcome
+);
 
-window.startAudioStream = startAudioStream;
-window.stopAudioStream = stopAudioStream;
+document.addEventListener(
+  "visibilitychange",
+  () => {
+    if (!document.hidden) {
+      keepNativeBridgeAlive();
+    }
+  }
+);
 
-window.addEventListener("DOMContentLoaded", () => {
-	hideSplashScreen();
-	document.body.classList.add("cds--g10");
-
-	const startButton =
-		document.getElementById("start") ||
-		document.getElementById("startButton") ||
-		document.querySelector("[data-audio-start]");
-
-	const stopButton =
-		document.getElementById("stop") ||
-		document.getElementById("stopButton") ||
-		document.querySelector("[data-audio-stop]");
-
-	if (startButton) {
-		startButton.addEventListener("click", () => {
-			startAudioStream();
-		});
-	}
-
-	if (stopButton) {
-		stopButton.addEventListener("click", () => {
-			stopAudioStream();
-		});
-	}
-
-	if (!started) {
-		updateConnectionUi("ready", "Tap Start to open the local WebSocket.");
-		setStats("-");
-		setStatsDetail("Aguardando áudio.");
-		startStartupPolling();
-		setActiveTab("overview");
-	}
-});
-
-document.addEventListener("visibilitychange", () => {
-	if (document.visibilityState === "hidden") {
-		handleAppPaused();
-		return;
-	}
-
-	handleAppResumed();
-	ensureAudioContextRunning();
-});
-
-window.addEventListener("focus", () => {
-	handleAppResumed();
-});
-
-document.addEventListener("pause", handleAppPaused, false);
-document.addEventListener("resume", handleAppResumed, false);
-
-window.addEventListener("blur", () => {
-	if (!started) return;
-
-	keepNativeBackgroundAudioAlive();
-	ensureAudioContextRunning();
-});
+window.addEventListener(
+  "focus",
+  () => keepNativeBridgeAlive()
+);
