@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -17,6 +18,8 @@ import numpy as np
 from phone_microphone_bridge import MIC_PORT, MIC_RECORDING_EVENT, PhoneMicrophoneBridge
 
 HOST = "127.0.0.1"
+APP_ID = "glauco.phone.audiospeaker"
+APP_VERSION_CODE = 2
 SPEAKER_PORT = 5001
 SAMPLE_RATE = 48000
 CHANNELS = 2
@@ -202,6 +205,36 @@ def configure_adb_reverse_once() -> None:
         parts = line.split()
         if len(parts) >= 2 and parts[1] == "device":
             devices.append(parts[0])
+
+    for device in devices:
+        try:
+            package = subprocess.run(
+                [ADB, "-s", device, "shell", "dumpsys", "package", APP_ID],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"Could not verify the Android app on {device}: {error}. "
+                "Run scripts/setup_duplex.py first."
+            ) from error
+
+        match = re.search(r"\bversionCode=(\d+)\b", package.stdout)
+        if package.returncode != 0 or not match:
+            raise RuntimeError(
+                f"{APP_ID} is not installed on {device}. "
+                "Run scripts/setup_duplex.py to build and install the app."
+            )
+
+        installed_version_code = int(match.group(1))
+        if installed_version_code < APP_VERSION_CODE:
+            raise RuntimeError(
+                f"The Android app on {device} is outdated "
+                f"(versionCode {installed_version_code}; "
+                f"need {APP_VERSION_CODE}). Run scripts/setup_duplex.py "
+                "to rebuild and install the matching app."
+            )
 
     for device in devices:
         for port in (SPEAKER_PORT, MIC_PORT):
@@ -601,6 +634,8 @@ async def main() -> None:
         capture.configure_linux(selected)
         speaker_backend = "Linux PipeWire/Pulse monitor"
 
+    await asyncio.to_thread(configure_adb_reverse_once)
+
     capture.start()
 
     speaker_server = await asyncio.start_server(
@@ -611,10 +646,6 @@ async def main() -> None:
 
     microphone_bridge = PhoneMicrophoneBridge()
     await microphone_bridge.start()
-
-    await asyncio.to_thread(
-        configure_adb_reverse_once
-    )
 
     print(
         f"Native phone speaker transport: "

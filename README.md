@@ -69,6 +69,8 @@ O script [`scripts/setup_duplex.py`](scripts/setup_duplex.py):
 7. instala o APK com `--no-streaming`;
 8. configura `adb reverse` nas portas `5001` e `5002`.
 
+O sender confere a versão do app Android antes de iniciar. Se o app estiver desatualizado ou não estiver instalado, execute `python .\scripts\setup_duplex.py` para compilar e instalar a versão compatível.
+
 ### Windows
 
 Requisitos:
@@ -166,13 +168,13 @@ Remova:
 
 ## Execução sem rebuild do APK
 
-Se o app já está instalado:
+Se o app compatível (versionCode 2 ou superior) já está instalado:
 
 ```bash
 python audio_sender.py
 ```
 
-O sender configura `adb reverse` uma vez. Abra **Audio Phone Speaker** no celular; os bridges Java reconectam sozinhos.
+O sender configura `adb reverse` uma vez. Abra **Audio Phone Speaker** no celular; os bridges Java reconectam sozinhos. Se a versão do app não corresponder ao transporte nativo usado pelo sender, ele encerra com a instrução para executar `scripts/setup_duplex.py`.
 
 Se quiser configurar manualmente:
 
