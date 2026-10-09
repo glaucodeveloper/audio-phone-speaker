@@ -298,6 +298,9 @@ class SpeakerCapture:
         self.stop_event = threading.Event()
         self.thread = None
         self.dropped_chunks = 0
+        self.latest_chunk_lock = threading.Lock()
+        self.latest_chunk = None
+        self.latest_chunk_at = 0.0
 
         self.device_index = None
         self.device_name = None
@@ -335,6 +338,10 @@ class SpeakerCapture:
         if len(chunk) != CHUNK_BYTES:
             return
 
+        with self.latest_chunk_lock:
+            self.latest_chunk = chunk
+            self.latest_chunk_at = time.monotonic()
+
         try:
             self.queue.put_nowait(chunk)
             return
@@ -351,6 +358,22 @@ class SpeakerCapture:
             self.queue.put_nowait(chunk)
         except queue.Full:
             pass
+
+    def seed_latest(self, max_age_seconds: float = 0.05) -> bool:
+        with self.latest_chunk_lock:
+            chunk = self.latest_chunk
+            age = time.monotonic() - self.latest_chunk_at
+
+        if chunk is None or age > max_age_seconds:
+            self.clear()
+            return False
+
+        self.clear()
+        try:
+            self.queue.put_nowait(chunk)
+        except queue.Full:
+            return False
+        return True
 
     def _packetize_stereo_i16(self, stereo: np.ndarray) -> None:
         total = len(stereo)
@@ -576,7 +599,8 @@ async def handle_speaker(
         low=0,
     )
 
-    capture.clear()
+    if capture.seed_latest():
+        print("Native phone speaker reconnect: resent latest PCM packet")
     print(
         "Native phone speaker connected:",
         peer,

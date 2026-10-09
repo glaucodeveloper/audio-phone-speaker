@@ -24,6 +24,7 @@ SAMPLE_RATE = 48000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
 MIC_CHUNK_FRAMES = 480
+VIRTUAL_MIC_UNDERFLOW_EXIT_CODE = 75
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -75,6 +76,7 @@ class VirtualMicrophoneSink:
         self.process = None
         self.ready = threading.Event()
         self.parent_dropped = 0
+        self.pending_resend = None
 
         if IS_WINDOWS:
             self.device_name = (
@@ -216,6 +218,7 @@ class VirtualMicrophoneSink:
     def _run(self) -> None:
         while not self.stop_event.is_set():
             process = None
+            last_payload = None
 
             try:
                 command = self._helper_command()
@@ -263,17 +266,22 @@ class VirtualMicrophoneSink:
                     not self.stop_event.is_set()
                     and process.poll() is None
                 ):
-                    try:
-                        payload = self.queue.get(
-                            timeout=0.2
-                        )
-                    except queue.Empty:
-                        continue
+                    if self.pending_resend is not None:
+                        payload = self.pending_resend
+                        self.pending_resend = None
+                    else:
+                        try:
+                            payload = self.queue.get(
+                                timeout=0.2
+                            )
+                        except queue.Empty:
+                            continue
 
                     if process.stdin is None:
                         break
 
                     process.stdin.write(payload)
+                    last_payload = payload
 
             except (
                 BrokenPipeError,
@@ -300,6 +308,19 @@ class VirtualMicrophoneSink:
                             process.stdin.close()
                     except Exception:
                         pass
+
+                    if (
+                        process.poll()
+                        == VIRTUAL_MIC_UNDERFLOW_EXIT_CODE
+                        and last_payload is not None
+                    ):
+                        self.pending_resend = last_payload
+                        print(
+                            "Virtual mic recovery: sink reconnected; "
+                            "resending last PCM chunk",
+                            flush=True,
+                        )
+                        time.sleep(0.1)
 
                     try:
                         if (

@@ -38,6 +38,12 @@ public final class PhoneSpeakerBridge {
     private Thread connectionThread;
     private long lastBacklogLogAtMs;
 
+    private static final class AudioTrackUnderflowException extends Exception {
+        AudioTrackUnderflowException(int count) {
+            super("AudioTrack underrun count increased to " + count);
+        }
+    }
+
     public synchronized void start() {
         if (running) return;
         running = true;
@@ -62,6 +68,7 @@ public final class PhoneSpeakerBridge {
         }
         while (running) {
             AudioTrack track = null;
+            boolean underflowRecovery = false;
             try (Socket connected = new Socket()) {
                 connected.setTcpNoDelay(true);
                 connected.setKeepAlive(true);
@@ -90,22 +97,42 @@ public final class PhoneSpeakerBridge {
                 if (!running) break;
                 track.play();
                 Log.i(TAG, "Speaker connected; prebuffered=" + primed);
+                int lastUnderrunCount = readUnderrunCount(track);
 
                 while (running && !connected.isClosed()) {
                     writeFully(track, readFreshFrame(input));
+                    int currentUnderrunCount = readUnderrunCount(track);
+                    if (currentUnderrunCount > lastUnderrunCount) {
+                        underflowRecovery = true;
+                        throw new AudioTrackUnderflowException(currentUnderrunCount);
+                    }
+                    lastUnderrunCount = currentUnderrunCount;
                 }
             } catch (Throwable error) {
-                if (running) Log.e(TAG, "Speaker transport failure; reconnecting", error);
+                underflowRecovery = underflowRecovery
+                    || error instanceof AudioTrackUnderflowException;
+                if (running && error instanceof AudioTrackUnderflowException) {
+                    Log.w(TAG, "AudioTrack underflow; reconnecting for fresh PCM", error);
+                } else if (running) {
+                    Log.e(TAG, "Speaker transport failure; reconnecting", error);
+                }
             } finally {
                 socket = null;
                 if (track != null) releaseAudioTrack(track);
             }
 
             if (running) {
-                try { Thread.sleep(500); }
+                try { Thread.sleep(underflowRecovery ? 100 : 500); }
                 catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             }
         }
+    }
+
+    private int readUnderrunCount(AudioTrack track) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            return track.getUnderrunCount();
+        }
+        return 0;
     }
 
     private AudioTrack createAudioTrack() {

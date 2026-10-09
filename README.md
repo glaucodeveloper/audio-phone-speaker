@@ -202,6 +202,7 @@ No Android, `PhoneSpeakerBridge.java`:
 - reproduz em `AudioTrack`;
 - usa 48 kHz, stereo, PCM16;
 - usa prebuffer de 10 ms e modo low-latency quando disponível; o tamanho real do buffer do `AudioTrack` é registrado no log do Android;
+- ao detectar underrun do `AudioTrack`, reconecta e recebe o pacote PCM mais recente;
 - reconecta em caso de queda.
 
 ### Telefone → PC
@@ -216,7 +217,7 @@ No Android, `PhoneSpeakerBridge.java`:
 
 No PC, `phone_microphone_bridge.py` encaminha os frames para um processo de áudio isolado.
 
-No Windows, `virtual_mic_sink_v15.py` mantém um jitter buffer-alvo de 100 ms com correção suave de drift antes de escrever no VB-CABLE. O isolamento em outro processo evita conflito entre os dois usos de PortAudio/WASAPI.
+No Windows, `virtual_mic_sink_v15.py` mantém um jitter buffer-alvo de 100 ms com correção suave de drift antes de escrever no VB-CABLE. Após três underflows em cinco segundos, o processo WASAPI é recriado e o último pacote PCM é reenviado. O isolamento em outro processo evita conflito entre os dois usos de PortAudio/WASAPI.
 
 No Linux, `virtual_mic_sink_linux.py` cria uma fonte PipeWire/Pulse com `module-pipe-source` e escreve o PCM de 48 kHz diretamente nela.
 

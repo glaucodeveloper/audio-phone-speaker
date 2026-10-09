@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -23,6 +24,9 @@ MAX_MS = 300
 # correction is capped at 5% of a callback to avoid abrupt pitch changes.
 DRIFT_DEADBAND_MS = 10
 MAX_DRIFT_RATIO = 0.05
+UNDERFLOW_RECONNECT_COUNT = 3
+UNDERFLOW_WINDOW_SECONDS = 5.0
+UNDERFLOW_RESTART_EXIT_CODE = 75
 
 
 def find_output_device(p: pyaudio.PyAudio, hint: str) -> dict:
@@ -91,6 +95,8 @@ class AdaptiveMicRenderer:
         self.reprime_frames = SAMPLE_RATE * REPRIME_MS // 1000
         self.max_frames = SAMPLE_RATE * MAX_MS // 1000
         self.underflows = 0
+        self.underflow_times = deque()
+        self.reconnect_requested = threading.Event()
         self.hard_dropped_frames = 0
         self.speedup_callbacks = 0
         self.slowdown_callbacks = 0
@@ -195,6 +201,16 @@ class AdaptiveMicRenderer:
 
             if available_frames < consume_frames:
                 self.underflows += 1
+                now = time.monotonic()
+                while (
+                    self.underflow_times
+                    and now - self.underflow_times[0]
+                    > UNDERFLOW_WINDOW_SECONDS
+                ):
+                    self.underflow_times.popleft()
+                self.underflow_times.append(now)
+                if len(self.underflow_times) >= UNDERFLOW_RECONNECT_COUNT:
+                    self.reconnect_requested.set()
                 self.primed = False
                 return (silence, pyaudio.paContinue)
 
@@ -295,6 +311,13 @@ def main() -> int:
 
             renderer.append(data)
             renderer.report_if_due()
+            if renderer.reconnect_requested.is_set():
+                print(
+                    "Virtual mic underflow threshold reached; "
+                    "restarting WASAPI sink",
+                    flush=True,
+                )
+                return UNDERFLOW_RESTART_EXIT_CODE
 
         return 0
 
