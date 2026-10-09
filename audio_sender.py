@@ -25,7 +25,7 @@ SAMPLE_RATE = 48000
 CHANNELS = 2
 SAMPLE_WIDTH = 2
 CHUNK_FRAMES = 480       # 10 ms transport packet
-CAPTURE_FRAMES = 960     # 20 ms capture block, split into 10 ms packets
+CAPTURE_FRAMES = 480     # 10 ms capture block keeps transport packets evenly paced
 CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * SAMPLE_WIDTH
 QUEUE_MAX = 2            # cap PC-side audio backlog at ~20 ms
 
@@ -301,6 +301,8 @@ class SpeakerCapture:
         self.latest_chunk_lock = threading.Lock()
         self.latest_chunk = None
         self.latest_chunk_at = 0.0
+        self.loop = None
+        self.queue_event = None
 
         self.device_index = None
         self.device_name = None
@@ -311,6 +313,45 @@ class SpeakerCapture:
     def configure_windows(self, device: dict) -> None:
         self.device_index = int(device["index"])
         self.device_name = str(device.get("name", "unknown"))
+
+    def bind_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.queue_event = asyncio.Event()
+
+    def notify_queue(self) -> None:
+        loop = self.loop
+        event = self.queue_event
+        if loop is not None and event is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(event.set)
+
+    async def get_next_chunk(self, writer: asyncio.StreamWriter):
+        event = self.queue_event
+        if event is None:
+            raise RuntimeError("Speaker queue event loop is not initialized.")
+
+        while not writer.is_closing():
+            try:
+                return self.queue.get_nowait()
+            except queue.Empty:
+                event.clear()
+
+            # Check again after clearing to avoid losing a producer wakeup.
+            try:
+                return self.queue.get_nowait()
+            except queue.Empty:
+                try:
+                    await asyncio.wait_for(
+                        event.wait(),
+                        timeout=CHUNK_FRAMES / SAMPLE_RATE,
+                    )
+                except asyncio.TimeoutError:
+                    if writer.is_closing():
+                        return None
+                    # Keep AudioTrack fed on a fixed 10 ms clock while WASAPI
+                    # has no frame ready; real captured PCM resumes immediately.
+                    return bytes(CHUNK_BYTES)
+
+        return None
 
     def configure_linux(self, device: dict) -> None:
         self.linux_speaker_name = str(device["speaker_name"])
@@ -344,6 +385,7 @@ class SpeakerCapture:
 
         try:
             self.queue.put_nowait(chunk)
+            self.notify_queue()
             return
         except queue.Full:
             pass
@@ -356,6 +398,7 @@ class SpeakerCapture:
 
         try:
             self.queue.put_nowait(chunk)
+            self.notify_queue()
         except queue.Full:
             pass
 
@@ -373,6 +416,7 @@ class SpeakerCapture:
             self.queue.put_nowait(chunk)
         except queue.Full:
             return False
+        self.notify_queue()
         return True
 
     def _packetize_stereo_i16(self, stereo: np.ndarray) -> None:
@@ -593,6 +637,7 @@ async def handle_speaker(
             and previous is not writer
         ):
             previous.close()
+            capture.notify_queue()
 
     writer.transport.set_write_buffer_limits(
         high=CHUNK_BYTES,
@@ -608,9 +653,9 @@ async def handle_speaker(
 
     try:
         while True:
-            chunk = await asyncio.to_thread(
-                capture.queue.get
-            )
+            chunk = await capture.get_next_chunk(writer)
+            if chunk is None:
+                break
 
             now = time.monotonic()
             if now - last_speaker_queue_report_at >= 5.0:
@@ -677,6 +722,7 @@ async def main() -> None:
         capture.configure_linux(selected)
         speaker_backend = "Linux PipeWire/Pulse monitor"
 
+    capture.bind_event_loop(asyncio.get_running_loop())
     await asyncio.to_thread(configure_adb_reverse_once)
 
     capture.start()

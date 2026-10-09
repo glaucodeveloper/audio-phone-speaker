@@ -28,15 +28,19 @@ public final class PhoneSpeakerBridge {
     private static final int MAX_SOCKET_BACKLOG_FRAMES = 1;
     private static final int MAX_SOCKET_BACKLOG_BYTES = MAX_SOCKET_BACKLOG_FRAMES
         * (FRAME_HEADER_BYTES + SAMPLE_RATE * BYTES_PER_FRAME * FRAME_DURATION_MS / 1000);
-    // Lowest-latency playback: one 10 ms packet to prime and track target.
-    private static final int START_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 10 / 1000;
-    private static final int TARGET_TRACK_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 10 / 1000;
+    private static final int UNDERFLOWS_BEFORE_RECONNECT = 5;
+    private static final long UNDERFLOW_RECONNECT_COOLDOWN_MS = 5000;
+    // Prime enough audio to cover Android's minimum AudioTrack buffer before play().
+    // Four 10 ms packets avoid starting playback below the device's observed 32 ms minimum.
+    private static final int START_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 40 / 1000;
+    private static final int TARGET_TRACK_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 40 / 1000;
 
     private volatile boolean running;
     private volatile Socket socket;
     private volatile AudioTrack audioTrack;
     private Thread connectionThread;
     private long lastBacklogLogAtMs;
+    private long lastUnderflowReconnectAtMs;
 
     private static final class AudioTrackUnderflowException extends Exception {
         AudioTrackUnderflowException(int count) {
@@ -98,13 +102,22 @@ public final class PhoneSpeakerBridge {
                 track.play();
                 Log.i(TAG, "Speaker connected; prebuffered=" + primed);
                 int lastUnderrunCount = readUnderrunCount(track);
+                int underflowsSinceConnection = 0;
 
                 while (running && !connected.isClosed()) {
                     writeFully(track, readFreshFrame(input));
                     int currentUnderrunCount = readUnderrunCount(track);
                     if (currentUnderrunCount > lastUnderrunCount) {
-                        underflowRecovery = true;
-                        throw new AudioTrackUnderflowException(currentUnderrunCount);
+                        underflowsSinceConnection += currentUnderrunCount - lastUnderrunCount;
+                        long now = SystemClock.elapsedRealtime();
+                        if (underflowsSinceConnection >= UNDERFLOWS_BEFORE_RECONNECT
+                            && (lastUnderflowReconnectAtMs == 0
+                                || now - lastUnderflowReconnectAtMs
+                                    >= UNDERFLOW_RECONNECT_COOLDOWN_MS)) {
+                            underflowRecovery = true;
+                            lastUnderflowReconnectAtMs = now;
+                            throw new AudioTrackUnderflowException(currentUnderrunCount);
+                        }
                     }
                     lastUnderrunCount = currentUnderrunCount;
                 }

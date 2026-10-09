@@ -192,7 +192,7 @@ adb reverse tcp:5002 tcp:5002
 - Windows: `PyAudioWPatch` + WASAPI loopback;
 - Linux: `SoundCard` + monitor PipeWire/Pulse.
 
-O capturador lê blocos de 20 ms e os divide em pacotes de 10 ms. A fila no PC comporta até dois pacotes e o telefone mantém no máximo um pacote de backlog, descartando áudio antigo sob pressão em vez de aumentar a latência. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
+O capturador lê blocos de 10 ms e envia pacotes no mesmo ritmo. A fila no PC comporta até dois pacotes e o telefone mantém no máximo um pacote de backlog, descartando áudio antigo sob pressão em vez de aumentar a latência. Se o loopback WASAPI não entregar um bloco no prazo, o servidor envia um pacote PCM de silêncio para manter o relógio de reprodução; o áudio capturado volta assim que fica disponível. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
 
 No Android, `PhoneSpeakerBridge.java`:
 
@@ -201,8 +201,8 @@ No Android, `PhoneSpeakerBridge.java`:
 - lê frames `length + PCM`;
 - reproduz em `AudioTrack`;
 - usa 48 kHz, stereo, PCM16;
-- usa prebuffer de 10 ms e modo low-latency quando disponível; o tamanho real do buffer do `AudioTrack` é registrado no log do Android;
-- ao detectar underrun do `AudioTrack`, reconecta e recebe o pacote PCM mais recente;
+- usa prebuffer de 40 ms e modo low-latency quando disponível; o tamanho real do buffer do `AudioTrack` é registrado no log do Android;
+- após cinco underruns, reconecta no máximo uma vez a cada cinco segundos e recebe o pacote PCM mais recente;
 - reconecta em caso de queda.
 
 ### Telefone → PC
