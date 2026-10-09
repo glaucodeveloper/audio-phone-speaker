@@ -25,7 +25,7 @@ public final class PhoneMicrophoneBridge {
     private static final int PORT = 5002;
     private static final int SAMPLE_RATE = 48000;
     private static final int CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
-    private static final int MIC_CHUNK_MS = 20;
+    private static final int MIC_CHUNK_MS = 10;
     private static final int MIC_CHUNK_BYTES = SAMPLE_RATE * 2 * MIC_CHUNK_MS / 1000;
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
     private static final int TYPE_CONTROL = 1;
@@ -142,7 +142,7 @@ public final class PhoneMicrophoneBridge {
         }
 
         int minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT);
-        int bufferSize = Math.max(minimum * 2, SAMPLE_RATE * 2 * 80 / 1000);
+        int bufferSize = Math.max(minimum * 2, SAMPLE_RATE * 2 * 40 / 1000);
         AudioRecord recorder = new AudioRecord.Builder()
             .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
             .setAudioFormat(new AudioFormat.Builder()

@@ -23,7 +23,7 @@ TYPE_PCM = 2
 SAMPLE_RATE = 48000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
-MIC_CHUNK_FRAMES = 960
+MIC_CHUNK_FRAMES = 480
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -69,7 +69,7 @@ class VirtualMicrophoneSink:
 
     def __init__(self, device_hint: str):
         self.device_hint = device_hint
-        self.queue = queue.Queue(maxsize=40)
+        self.queue = queue.Queue(maxsize=2)
         self.stop_event = threading.Event()
         self.thread = None
         self.process = None
@@ -366,7 +366,7 @@ class PhoneMicrophoneBridge:
         print(f"Phone microphone transport: tcp://{HOST}:{MIC_PORT}")
         print(f"Phone microphone control:   http://{HOST}:{CONTROL_PORT}")
         print(
-            f"Phone microphone format:    {SAMPLE_RATE} Hz / mono / PCM s16le / 20 ms"
+            f"Phone microphone format:    {SAMPLE_RATE} Hz / mono / PCM s16le / 10 ms"
         )
 
     async def stop(self) -> None:

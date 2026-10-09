@@ -24,10 +24,10 @@ SPEAKER_PORT = 5001
 SAMPLE_RATE = 48000
 CHANNELS = 2
 SAMPLE_WIDTH = 2
-CHUNK_FRAMES = 960       # 20 ms transport packet
-CAPTURE_FRAMES = 1920    # 40 ms capture block
+CHUNK_FRAMES = 480       # 10 ms transport packet
+CAPTURE_FRAMES = 960     # 20 ms capture block, split into 10 ms packets
 CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * SAMPLE_WIDTH
-QUEUE_MAX = 4            # cap PC-side audio backlog at ~80 ms
+QUEUE_MAX = 2            # cap PC-side audio backlog at ~20 ms
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -572,8 +572,8 @@ async def handle_speaker(
             previous.close()
 
     writer.transport.set_write_buffer_limits(
-        high=CHUNK_BYTES * 2,
-        low=CHUNK_BYTES,
+        high=CHUNK_BYTES,
+        low=0,
     )
 
     capture.clear()
@@ -672,15 +672,15 @@ async def main() -> None:
     )
     print(
         "Speaker: PCM s16le / 48 kHz / "
-        "stereo / 20 ms native TCP"
+        "stereo / 10 ms native TCP"
     )
     print(
         f"Speaker capture: {speaker_backend} "
-        "-> 20 ms TCP packets"
+        "-> 10 ms TCP packets"
     )
     print(
         "Phone microphone: PCM s16le / "
-        "48 kHz / mono / 20 ms chunks"
+        "48 kHz / mono / 10 ms chunks"
     )
 
     if IS_WINDOWS:

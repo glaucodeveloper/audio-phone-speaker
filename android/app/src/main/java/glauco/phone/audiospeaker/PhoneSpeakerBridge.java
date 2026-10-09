@@ -24,13 +24,13 @@ public final class PhoneSpeakerBridge {
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
     private static final int BYTES_PER_FRAME = 4;
     private static final int FRAME_HEADER_BYTES = 4;
-    private static final int FRAME_DURATION_MS = 20;
-    private static final int MAX_SOCKET_BACKLOG_FRAMES = 4;
+    private static final int FRAME_DURATION_MS = 10;
+    private static final int MAX_SOCKET_BACKLOG_FRAMES = 1;
     private static final int MAX_SOCKET_BACKLOG_BYTES = MAX_SOCKET_BACKLOG_FRAMES
         * (FRAME_HEADER_BYTES + SAMPLE_RATE * BYTES_PER_FRAME * FRAME_DURATION_MS / 1000);
-    // Low-latency playback: 40 ms initial prime, ~80 ms track target.
-    private static final int START_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 40 / 1000;
-    private static final int TARGET_TRACK_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 80 / 1000;
+    // Lowest-latency playback: one 10 ms packet to prime and track target.
+    private static final int START_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 10 / 1000;
+    private static final int TARGET_TRACK_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 10 / 1000;
 
     private volatile boolean running;
     private volatile Socket socket;
@@ -110,7 +110,7 @@ public final class PhoneSpeakerBridge {
 
     private AudioTrack createAudioTrack() {
         int minimum = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT);
-        int bufferSize = Math.max(minimum * 2, TARGET_TRACK_BUFFER_BYTES);
+        int bufferSize = Math.max(minimum, TARGET_TRACK_BUFFER_BYTES);
 
         AudioAttributes attributes = new AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -138,6 +138,12 @@ public final class PhoneSpeakerBridge {
             track.release();
             throw new IllegalStateException("AudioTrack failed to initialize");
         }
+        Log.i(
+            TAG,
+            "AudioTrack buffer="
+                + (track.getBufferSizeInFrames() * 1000 / SAMPLE_RATE)
+                + "ms, minimum=" + minimum + " bytes, requested=" + bufferSize + " bytes"
+        );
         return track;
     }
 

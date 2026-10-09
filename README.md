@@ -192,7 +192,7 @@ adb reverse tcp:5002 tcp:5002
 - Windows: `PyAudioWPatch` + WASAPI loopback;
 - Linux: `SoundCard` + monitor PipeWire/Pulse.
 
-O capturador lê blocos de 40 ms e os divide em pacotes de 20 ms. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
+O capturador lê blocos de 20 ms e os divide em pacotes de 10 ms. A fila no PC comporta até dois pacotes e o telefone mantém no máximo um pacote de backlog, descartando áudio antigo sob pressão em vez de aumentar a latência. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
 
 No Android, `PhoneSpeakerBridge.java`:
 
@@ -201,7 +201,7 @@ No Android, `PhoneSpeakerBridge.java`:
 - lê frames `length + PCM`;
 - reproduz em `AudioTrack`;
 - usa 48 kHz, stereo, PCM16;
-- usa prebuffer curto e modo low-latency quando disponível;
+- usa prebuffer de 10 ms e modo low-latency quando disponível; o tamanho real do buffer do `AudioTrack` é registrado no log do Android;
 - reconecta em caso de queda.
 
 ### Telefone → PC
@@ -211,12 +211,12 @@ No Android, `PhoneSpeakerBridge.java`:
 - 48 kHz;
 - mono;
 - PCM16;
-- blocos de 20 ms;
+- blocos de 10 ms;
 - TCP `5002`.
 
 No PC, `phone_microphone_bridge.py` encaminha os frames para um processo de áudio isolado.
 
-No Windows, `virtual_mic_sink_v15.py` mantém um jitter buffer com correção suave de drift antes de escrever no VB-CABLE. O isolamento em outro processo evita conflito entre os dois usos de PortAudio/WASAPI.
+No Windows, `virtual_mic_sink_v15.py` mantém um jitter buffer-alvo de 100 ms com correção suave de drift antes de escrever no VB-CABLE. O isolamento em outro processo evita conflito entre os dois usos de PortAudio/WASAPI.
 
 No Linux, `virtual_mic_sink_linux.py` cria uma fonte PipeWire/Pulse com `module-pipe-source` e escreve o PCM de 48 kHz diretamente nela.
 
