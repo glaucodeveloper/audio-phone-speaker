@@ -27,7 +27,7 @@ SAMPLE_WIDTH = 2
 CHUNK_FRAMES = 960       # 20 ms transport packet
 CAPTURE_FRAMES = 1920    # 40 ms capture block
 CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * SAMPLE_WIDTH
-QUEUE_MAX = 8            # max ~160 ms emergency queue
+QUEUE_MAX = 4            # cap PC-side audio backlog at ~80 ms
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -297,6 +297,7 @@ class SpeakerCapture:
         self.queue = queue.Queue(maxsize=QUEUE_MAX)
         self.stop_event = threading.Event()
         self.thread = None
+        self.dropped_chunks = 0
 
         self.device_index = None
         self.device_name = None
@@ -342,6 +343,7 @@ class SpeakerCapture:
 
         try:
             self.queue.get_nowait()
+            self.dropped_chunks += 1
         except queue.Empty:
             pass
 
@@ -509,13 +511,14 @@ class SpeakerCapture:
 capture = SpeakerCapture()
 active_speaker_writer = None
 active_writer_lock = asyncio.Lock()
+last_speaker_queue_report_at = 0.0
 
 
 async def handle_speaker(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
-    global active_speaker_writer
+    global active_speaker_writer, last_speaker_queue_report_at
 
     peer = writer.get_extra_info("peername")
 
@@ -568,6 +571,11 @@ async def handle_speaker(
         ):
             previous.close()
 
+    writer.transport.set_write_buffer_limits(
+        high=CHUNK_BYTES * 2,
+        low=CHUNK_BYTES,
+    )
+
     capture.clear()
     print(
         "Native phone speaker connected:",
@@ -579,6 +587,17 @@ async def handle_speaker(
             chunk = await asyncio.to_thread(
                 capture.queue.get
             )
+
+            now = time.monotonic()
+            if now - last_speaker_queue_report_at >= 5.0:
+                last_speaker_queue_report_at = now
+                queued_frames = capture.queue.qsize()
+                print(
+                    "PC audio queue:",
+                    f"{queued_frames}/{QUEUE_MAX} frames",
+                    f"({queued_frames * CHUNK_FRAMES * 1000 // SAMPLE_RATE} ms)",
+                    f"dropped={capture.dropped_chunks}",
+                )
 
             if (
                 MUTE_SPEAKER_DURING_MIC
