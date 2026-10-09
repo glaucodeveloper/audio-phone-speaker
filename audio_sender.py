@@ -276,6 +276,7 @@ def monitor_adb_reverse(stop_event: threading.Event) -> None:
     """Restore reverse tunnels automatically after USB/ADB reconnects."""
     states = {}
     ports = (SPEAKER_PORT, MIC_PORT)
+    last_monitor_status = None
 
     while not stop_event.is_set():
         try:
@@ -285,41 +286,86 @@ def monitor_adb_reverse(stop_event: threading.Event) -> None:
                 text=True,
                 timeout=5,
             )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "adb devices failed")
             devices = {
                 parts[0]
                 for line in result.stdout.splitlines()[1:]
                 if len(parts := line.split()) >= 2 and parts[1] == "device"
             }
-        except Exception:
+        except Exception as error:
+            status = f"unavailable: {error}"
+            if status != last_monitor_status:
+                print(f"ADB reconnect monitor {status}", flush=True)
+                last_monitor_status = status
             stop_event.wait(ADB_REVERSE_MONITOR_INTERVAL_SECONDS)
             continue
+
+        status = "online" if devices else "waiting for an authorized USB device"
+        if status != last_monitor_status:
+            print(f"ADB reconnect monitor: {status}", flush=True)
+            last_monitor_status = status
 
         for key in list(states):
             if key[0] not in devices:
                 del states[key]
 
         for device in devices:
+            try:
+                reverse_list = subprocess.run(
+                    [ADB, "-s", device, "reverse", "--list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if reverse_list.returncode != 0:
+                    raise RuntimeError(
+                        reverse_list.stderr.strip()
+                        or "adb reverse --list failed"
+                    )
+                existing_mappings = {
+                    (parts[-2], parts[-1])
+                    for line in reverse_list.stdout.splitlines()
+                    if len(parts := line.split()) >= 3
+                }
+            except Exception as error:
+                for port in ports:
+                    key = (device, port)
+                    if states.get(key) is not False:
+                        print(
+                            f"ADB reverse status unavailable {device}: "
+                            f"{error}",
+                            flush=True,
+                        )
+                    states[key] = False
+                continue
+
             for port in ports:
                 key = (device, port)
-                try:
-                    reverse = subprocess.run(
-                        [
-                            ADB,
-                            "-s",
-                            device,
-                            "reverse",
-                            f"tcp:{port}",
-                            f"tcp:{port}",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=3,
-                    )
-                    active = reverse.returncode == 0
-                    detail = reverse.stderr.strip()
-                except Exception as error:
-                    active = False
-                    detail = repr(error)
+                endpoint = f"tcp:{port}"
+                if (endpoint, endpoint) in existing_mappings:
+                    active = True
+                    detail = ""
+                else:
+                    try:
+                        reverse = subprocess.run(
+                            [
+                                ADB,
+                                "-s",
+                                device,
+                                "reverse",
+                                endpoint,
+                                endpoint,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=3,
+                        )
+                        active = reverse.returncode == 0
+                        detail = reverse.stderr.strip()
+                    except Exception as error:
+                        active = False
+                        detail = repr(error)
 
                 if states.get(key) != active:
                     if active:
@@ -791,7 +837,14 @@ async def main() -> None:
         speaker_backend = "Linux PipeWire/Pulse monitor"
 
     capture.bind_event_loop(asyncio.get_running_loop())
-    await asyncio.to_thread(configure_adb_reverse_once)
+    try:
+        await asyncio.to_thread(configure_adb_reverse_once)
+    except Exception as error:
+        print(
+            "ADB/app startup check failed; audio servers remain active "
+            f"while USB recovery continues: {error}",
+            flush=True,
+        )
     adb_monitor_stop = threading.Event()
     adb_monitor = threading.Thread(
         target=monitor_adb_reverse,

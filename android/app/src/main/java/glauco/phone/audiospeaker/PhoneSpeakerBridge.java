@@ -30,6 +30,8 @@ public final class PhoneSpeakerBridge {
         * (FRAME_HEADER_BYTES + SAMPLE_RATE * BYTES_PER_FRAME * FRAME_DURATION_MS / 1000);
     private static final int UNDERFLOWS_BEFORE_RECONNECT = 5;
     private static final long UNDERFLOW_RECONNECT_COOLDOWN_MS = 5000;
+    private static final long MIN_TRANSPORT_RECONNECT_DELAY_MS = 250;
+    private static final long MAX_TRANSPORT_RECONNECT_DELAY_MS = 2000;
     // Prime enough audio to cover Android's minimum AudioTrack buffer before play().
     // Four 10 ms packets avoid starting playback below the device's observed 32 ms minimum.
     private static final int START_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 40 / 1000;
@@ -41,6 +43,7 @@ public final class PhoneSpeakerBridge {
     private Thread connectionThread;
     private long lastBacklogLogAtMs;
     private long lastUnderflowReconnectAtMs;
+    private long transportReconnectDelayMs = MIN_TRANSPORT_RECONNECT_DELAY_MS;
 
     private static final class AudioTrackUnderflowException extends Exception {
         AudioTrackUnderflowException(int count) {
@@ -73,11 +76,13 @@ public final class PhoneSpeakerBridge {
         while (running) {
             AudioTrack track = null;
             boolean underflowRecovery = false;
+            long connectionStartedAtMs = 0;
             try (Socket connected = new Socket()) {
                 connected.setTcpNoDelay(true);
                 connected.setKeepAlive(true);
                 connected.setReceiveBufferSize(MAX_SOCKET_BACKLOG_BYTES);
                 connected.connect(new InetSocketAddress(HOST, PORT), 4000);
+                connectionStartedAtMs = SystemClock.elapsedRealtime();
                 socket = connected;
 
                 // Authenticate the native speaker transport before PCM starts.
@@ -135,7 +140,20 @@ public final class PhoneSpeakerBridge {
             }
 
             if (running) {
-                try { Thread.sleep(underflowRecovery ? 100 : 500); }
+                long reconnectDelayMs = 100;
+                if (!underflowRecovery) {
+                    long now = SystemClock.elapsedRealtime();
+                    if (connectionStartedAtMs > 0
+                        && now - connectionStartedAtMs >= 10000) {
+                        transportReconnectDelayMs = MIN_TRANSPORT_RECONNECT_DELAY_MS;
+                    }
+                    reconnectDelayMs = transportReconnectDelayMs;
+                    transportReconnectDelayMs = Math.min(
+                        transportReconnectDelayMs * 2,
+                        MAX_TRANSPORT_RECONNECT_DELAY_MS
+                    );
+                }
+                try { Thread.sleep(reconnectDelayMs); }
                 catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             }
         }

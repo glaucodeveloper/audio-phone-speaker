@@ -288,11 +288,17 @@ class VirtualMicrophoneSink:
                 OSError,
                 RuntimeError,
             ) as error:
-                if not self.stop_event.is_set():
+                expected_underflow_exit = (
+                    process is not None
+                    and process.poll()
+                    == VIRTUAL_MIC_UNDERFLOW_EXIT_CODE
+                )
+                if not self.stop_event.is_set() and not expected_underflow_exit:
                     print(
                         "Virtual microphone "
                         "process restart:",
                         repr(error),
+                        flush=True,
                     )
                     time.sleep(0.5)
 

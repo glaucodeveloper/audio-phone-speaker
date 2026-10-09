@@ -203,6 +203,7 @@ No Android, `PhoneSpeakerBridge.java`:
 - usa 48 kHz, stereo, PCM16;
 - usa prebuffer de 40 ms e modo low-latency quando disponível; o tamanho real do buffer do `AudioTrack` é registrado no log do Android;
 - após cinco underruns, reconecta no máximo uma vez a cada cinco segundos e recebe o pacote PCM mais recente;
+- em falhas de transporte, tenta reconectar com espera progressiva de 250 ms a 2 s, reiniciada após dez segundos estáveis;
 - reconecta em caso de queda.
 
 ### Telefone → PC
