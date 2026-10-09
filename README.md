@@ -192,7 +192,7 @@ adb reverse tcp:5002 tcp:5002
 - Windows: `PyAudioWPatch` + WASAPI loopback;
 - Linux: `SoundCard` + monitor PipeWire/Pulse.
 
-O capturador lê blocos de 10 ms e envia pacotes no mesmo ritmo. A fila no PC comporta até dois pacotes e o telefone mantém no máximo um pacote de backlog, descartando áudio antigo sob pressão em vez de aumentar a latência. Se o loopback WASAPI não entregar um bloco no prazo, o servidor envia um pacote PCM de silêncio para manter o relógio de reprodução; o áudio capturado volta assim que fica disponível. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
+O capturador lê blocos de 10 ms e envia pacotes no mesmo ritmo. A fila no PC comporta até dois pacotes e o telefone mantém no máximo um pacote de backlog, descartando áudio antigo sob pressão em vez de aumentar a latência. Se o loopback WASAPI não entregar um bloco no prazo, o servidor envia um pacote PCM de silêncio para manter o relógio de reprodução; o áudio capturado volta assim que fica disponível. O bridge monitora o ADB e restaura as portas reversas depois que o USB reconecta. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
 
 No Android, `PhoneSpeakerBridge.java`:
 

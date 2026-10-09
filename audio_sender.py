@@ -28,6 +28,7 @@ CHUNK_FRAMES = 480       # 10 ms transport packet
 CAPTURE_FRAMES = 480     # 10 ms capture block keeps transport packets evenly paced
 CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * SAMPLE_WIDTH
 QUEUE_MAX = 2            # cap PC-side audio backlog at ~20 ms
+ADB_REVERSE_MONITOR_INTERVAL_SECONDS = 2.0
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -268,7 +269,74 @@ def configure_adb_reverse_once() -> None:
                     repr(error),
                 )
 
-    print("ADB setup complete; no runtime polling or app relaunching.")
+    print("Initial ADB reverse setup complete.")
+
+
+def monitor_adb_reverse(stop_event: threading.Event) -> None:
+    """Restore reverse tunnels automatically after USB/ADB reconnects."""
+    states = {}
+    ports = (SPEAKER_PORT, MIC_PORT)
+
+    while not stop_event.is_set():
+        try:
+            result = subprocess.run(
+                [ADB, "devices"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            devices = {
+                parts[0]
+                for line in result.stdout.splitlines()[1:]
+                if len(parts := line.split()) >= 2 and parts[1] == "device"
+            }
+        except Exception:
+            stop_event.wait(ADB_REVERSE_MONITOR_INTERVAL_SECONDS)
+            continue
+
+        for key in list(states):
+            if key[0] not in devices:
+                del states[key]
+
+        for device in devices:
+            for port in ports:
+                key = (device, port)
+                try:
+                    reverse = subprocess.run(
+                        [
+                            ADB,
+                            "-s",
+                            device,
+                            "reverse",
+                            f"tcp:{port}",
+                            f"tcp:{port}",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    active = reverse.returncode == 0
+                    detail = reverse.stderr.strip()
+                except Exception as error:
+                    active = False
+                    detail = repr(error)
+
+                if states.get(key) != active:
+                    if active:
+                        print(
+                            f"ADB reverse restored {device}: "
+                            f"tcp:{port} -> tcp:{port}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"ADB reverse unavailable {device}:{port}: "
+                            f"{detail}",
+                            flush=True,
+                        )
+                states[key] = active
+
+        stop_event.wait(ADB_REVERSE_MONITOR_INTERVAL_SECONDS)
 
 
 def normalize_channels(data: np.ndarray) -> np.ndarray:
@@ -724,6 +792,14 @@ async def main() -> None:
 
     capture.bind_event_loop(asyncio.get_running_loop())
     await asyncio.to_thread(configure_adb_reverse_once)
+    adb_monitor_stop = threading.Event()
+    adb_monitor = threading.Thread(
+        target=monitor_adb_reverse,
+        args=(adb_monitor_stop,),
+        name="adb-reverse-monitor",
+        daemon=True,
+    )
+    adb_monitor.start()
 
     capture.start()
 
@@ -773,6 +849,7 @@ async def main() -> None:
         async with speaker_server:
             await speaker_server.serve_forever()
     finally:
+        adb_monitor_stop.set()
         capture.stop_event.set()
         await microphone_bridge.stop()
 
