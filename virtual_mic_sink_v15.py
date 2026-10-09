@@ -19,10 +19,10 @@ TARGET_MS = 100
 REPRIME_MS = 60
 MAX_MS = 300
 
-# Smooth drift correction: +/- 2 input frames per 10 ms callback (~0.4%).
-DRIFT_FRAMES = 2
-DRIFT_HIGH_MS = 125
-DRIFT_LOW_MS = 75
+# Correct clock drift in proportion to the distance from the target. The
+# correction is capped at 5% of a callback to avoid abrupt pitch changes.
+DRIFT_DEADBAND_MS = 10
+MAX_DRIFT_RATIO = 0.05
 
 
 def find_output_device(p: pyaudio.PyAudio, hint: str) -> dict:
@@ -85,11 +85,11 @@ class AdaptiveMicRenderer:
 
         self.prime_frames = SAMPLE_RATE * PRIME_MS // 1000
         self.target_frames = SAMPLE_RATE * TARGET_MS // 1000
+        self.deadband_frames = (
+            SAMPLE_RATE * DRIFT_DEADBAND_MS // 1000
+        )
         self.reprime_frames = SAMPLE_RATE * REPRIME_MS // 1000
         self.max_frames = SAMPLE_RATE * MAX_MS // 1000
-        self.high_frames = SAMPLE_RATE * DRIFT_HIGH_MS // 1000
-        self.low_frames = SAMPLE_RATE * DRIFT_LOW_MS // 1000
-
         self.underflows = 0
         self.hard_dropped_frames = 0
         self.speedup_callbacks = 0
@@ -172,11 +172,25 @@ class AdaptiveMicRenderer:
 
             consume_frames = frame_count
 
-            if available_frames > self.high_frames:
-                consume_frames += DRIFT_FRAMES
+            error_frames = available_frames - self.target_frames
+            max_correction = max(
+                1,
+                int(frame_count * MAX_DRIFT_RATIO),
+            )
+
+            if error_frames > self.deadband_frames:
+                correction = min(
+                    max_correction,
+                    max(1, error_frames // 40),
+                )
+                consume_frames += correction
                 self.speedup_callbacks += 1
-            elif available_frames < self.low_frames:
-                consume_frames = max(1, frame_count - DRIFT_FRAMES)
+            elif error_frames < -self.deadband_frames:
+                correction = min(
+                    max_correction,
+                    max(1, -error_frames // 40),
+                )
+                consume_frames = max(1, frame_count - correction)
                 self.slowdown_callbacks += 1
 
             if available_frames < consume_frames:
@@ -249,7 +263,8 @@ def main() -> int:
         print(
             "Virtual mic adaptive clock:",
             f"callback=10ms target={TARGET_MS}ms "
-            f"range={DRIFT_LOW_MS}-{DRIFT_HIGH_MS}ms "
+            f"deadband=+/-{DRIFT_DEADBAND_MS}ms "
+            f"maxCorrection={MAX_DRIFT_RATIO:.0%} "
             f"max={MAX_MS}ms",
             flush=True,
         )
