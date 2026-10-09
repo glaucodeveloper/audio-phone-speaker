@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 
 APP_ID = "glauco.phone.audiospeaker"
-PORTS = (5001, 5002)
+PORTS = (5002, 5004)
+LEGACY_PORTS = (5000, 5001)
 
 
 class SetupError(RuntimeError):
@@ -343,6 +344,20 @@ def configure_reverse(
     adb: str,
     serial: str,
 ) -> None:
+    for port in LEGACY_PORTS:
+        run(
+            [
+                adb,
+                "-s",
+                serial,
+                "reverse",
+                "--remove",
+                f"tcp:{port}",
+            ],
+            timeout=10,
+            check=False,
+        )
+
     for port in PORTS:
         run(
             [

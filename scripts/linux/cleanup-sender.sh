@@ -15,7 +15,7 @@ fi
 if command -v adb >/dev/null 2>&1; then
   mapfile -t devices < <(adb devices | awk 'NR > 1 && $2 == "device" { print $1 }')
   for device in "${devices[@]}"; do
-    for port in 5001 5002; do
+    for port in 5000 5001 5002 5004; do
       adb -s "$device" reverse --remove "tcp:$port" >/dev/null 2>&1 || true
     done
   done

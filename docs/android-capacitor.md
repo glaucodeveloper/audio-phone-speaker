@@ -64,19 +64,19 @@ O serviço continua dono dos bridges quando o WebView pausa.
 
 ## Speaker: PC → Android
 
-`PhoneSpeakerBridge.java` conecta a:
+`PhoneSpeakerBridge.java` primeiro consulta o endpoint de descoberta:
 
 ```text
-127.0.0.1:5001
+127.0.0.1:5004
 ```
 
-Como a porta existe no PC, o comando:
+O protocolo de descoberta é uma linha `SPK?` → `SPK1 <porta>`. O sender escolhe uma porta TCP livre para o speaker, anuncia-a por essa conexão e configura `adb reverse` para a porta escolhida. Assim, o APK não depende de um número fixo para o transporte PCM. A descoberta também usa ADB reverse:
 
 ```bash
-adb reverse tcp:5001 tcp:5001
+adb reverse tcp:5004 tcp:5004
 ```
 
-faz com que `127.0.0.1:5001` visto pelo Android chegue ao processo Python no computador.
+Depois, o Android conecta à porta anunciada em `127.0.0.1`.
 
 ### Handshake
 

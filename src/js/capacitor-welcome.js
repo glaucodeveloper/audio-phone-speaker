@@ -1,5 +1,6 @@
-const SPEAKER_PORT = 5001;
+const SPEAKER_PORT = "dinâmica";
 const MIC_PORT = 5002;
+const SPEAKER_DISCOVERY_PORT = 5004;
 const SAMPLE_RATE = 48000;
 
 function backgroundAudioPlugin() {
@@ -48,7 +49,7 @@ async function keepNativeBridgeAlive() {
 
     setState(
       "ativo",
-      "AudioTrack + AudioRecord conectam diretamente às portas ADB reverse."
+      "AudioTrack descobre a porta do speaker; AudioRecord usa ADB reverse."
     );
   } catch (error) {
     console.error("BackgroundAudio.keepAlive failed:", error);
@@ -137,8 +138,8 @@ class CapacitorWelcome extends HTMLElement {
 
           <p class="footnote">
             Mantenha a depuração USB autorizada. O processo Python no computador
-            configura <code>adb reverse tcp:5001</code> e
-            <code>adb reverse tcp:5002</code>.
+            configura a descoberta em <code>tcp:${SPEAKER_DISCOVERY_PORT}</code>,
+            a porta dinâmica do speaker e <code>tcp:${MIC_PORT}</code>.
           </p>
         </section>
       </main>

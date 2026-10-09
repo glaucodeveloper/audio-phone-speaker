@@ -11,16 +11,22 @@ import sys
 import threading
 import time
 import warnings
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 
-from phone_microphone_bridge import MIC_PORT, MIC_RECORDING_EVENT, PhoneMicrophoneBridge
+from phone_microphone_bridge import (
+    CONTROL_PORT,
+    MIC_PORT,
+    MIC_RECORDING_EVENT,
+    PhoneMicrophoneBridge,
+)
 
 HOST = "127.0.0.1"
 APP_ID = "glauco.phone.audiospeaker"
 APP_VERSION_CODE = 2
-SPEAKER_PORT = 5001
+SPEAKER_DISCOVERY_PORT = 5004
 SAMPLE_RATE = 48000
 CHANNELS = 2
 SAMPLE_WIDTH = 2
@@ -188,7 +194,7 @@ def find_adb() -> str:
 ADB = find_adb()
 
 
-def configure_adb_reverse_once() -> None:
+def configure_adb_reverse_once(speaker_port: int) -> None:
     try:
         result = subprocess.run(
             [ADB, "devices"],
@@ -239,7 +245,22 @@ def configure_adb_reverse_once() -> None:
             )
 
     for device in devices:
-        for port in (SPEAKER_PORT, MIC_PORT):
+        for legacy_port in (5000, 5001):
+            try:
+                subprocess.run(
+                    [ADB, "-s", device, "reverse", "--remove", f"tcp:{legacy_port}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception as error:
+                print(
+                    f"Could not remove legacy ADB reverse {device}:"
+                    f"{legacy_port}: {error}",
+                    flush=True,
+                )
+
+        for port in (SPEAKER_DISCOVERY_PORT, speaker_port, MIC_PORT):
             try:
                 reverse = subprocess.run(
                     [
@@ -273,10 +294,13 @@ def configure_adb_reverse_once() -> None:
     print("Initial ADB reverse setup complete.")
 
 
-def monitor_adb_reverse(stop_event: threading.Event) -> None:
+def monitor_adb_reverse(
+    stop_event: threading.Event,
+    speaker_port: int,
+) -> None:
     """Restore reverse tunnels automatically after USB/ADB reconnects."""
     states = {}
-    ports = (SPEAKER_PORT, MIC_PORT)
+    ports = (SPEAKER_DISCOVERY_PORT, speaker_port, MIC_PORT)
     last_monitor_status = None
 
     while not stop_event.is_set():
@@ -705,7 +729,7 @@ async def handle_speaker(
     peer = writer.get_extra_info("peername")
 
     # Native Android bridge identifies itself with SPK1. This also prevents
-    # an old WebView/WebSocket client from taking ownership of tcp:5001.
+    # an old WebView/WebSocket client from taking ownership of the TCP stream.
     try:
         hello = await asyncio.wait_for(
             reader.readexactly(4),
@@ -718,7 +742,7 @@ async def handle_speaker(
         OSError,
     ) as error:
         print(
-            "Rejected tcp:5001 client",
+            "Rejected speaker client",
             peer,
             "without SPK1:",
             repr(error),
@@ -732,7 +756,7 @@ async def handle_speaker(
 
     if hello != b"SPK1":
         print(
-            "Rejected non-native tcp:5001 client",
+            "Rejected non-native speaker client",
             peer,
             "prefix=",
             repr(hello),
@@ -834,6 +858,30 @@ async def handle_speaker(
             pass
 
 
+async def handle_speaker_discovery(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    speaker_port: int,
+) -> None:
+    """Return the current PCM port to the native Android bridge."""
+    try:
+        request = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        if request.rstrip(b"\r\n") == b"SPK?":
+            writer.write(f"SPK1 {speaker_port}\n".encode("ascii"))
+        else:
+            writer.write(b"ERR\n")
+        await writer.drain()
+    except (asyncio.TimeoutError, ConnectionError, OSError):
+        pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
 async def main() -> None:
     if IS_WINDOWS:
         with pyaudio.PyAudio() as p:
@@ -855,73 +903,85 @@ async def main() -> None:
         speaker_backend = "Linux PipeWire/Pulse monitor"
 
     capture.bind_event_loop(asyncio.get_running_loop())
-    try:
-        await asyncio.to_thread(configure_adb_reverse_once)
-    except Exception as error:
-        print(
-            "ADB/app startup check failed; audio servers remain active "
-            f"while USB recovery continues: {error}",
-            flush=True,
-        )
-    adb_monitor_stop = threading.Event()
-    adb_monitor = threading.Thread(
-        target=monitor_adb_reverse,
-        args=(adb_monitor_stop,),
-        name="adb-reverse-monitor",
-        daemon=True,
-    )
-    adb_monitor.start()
-
-    capture.start()
-
     speaker_server = await asyncio.start_server(
         handle_speaker,
         HOST,
-        SPEAKER_PORT,
+        0,
+    )
+    speaker_port = int(speaker_server.sockets[0].getsockname()[1])
+    discovery_server = await asyncio.start_server(
+        partial(handle_speaker_discovery, speaker_port=speaker_port),
+        HOST,
+        SPEAKER_DISCOVERY_PORT,
     )
 
     microphone_bridge = PhoneMicrophoneBridge()
-    await microphone_bridge.start()
-
-    print(
-        f"Native phone speaker transport: "
-        f"tcp://{HOST}:{SPEAKER_PORT}"
-    )
-    print(
-        "Speaker: PCM s16le / 48 kHz / "
-        "stereo / 10 ms native TCP"
-    )
-    print(
-        f"Speaker capture: {speaker_backend} "
-        "-> 10 ms TCP packets"
-    )
-    print(
-        "Phone microphone: PCM s16le / "
-        "48 kHz / mono / 10 ms chunks"
-    )
-
-    if IS_WINDOWS:
-        print(
-            "Phone -> PC: mic 48 kHz -> tcp:5002 -> "
-            "CABLE Input -> CABLE Output -> browser"
-        )
-    else:
-        print(
-            "Phone -> PC: mic 48 kHz -> tcp:5002 -> "
-            "PipeWire/Pulse source -> browser"
-        )
-
-    print(
-        "Open the Android app manually. "
-        "It reconnects by itself."
-    )
-
+    adb_monitor_stop = threading.Event()
+    adb_monitor = None
     try:
-        async with speaker_server:
+        await microphone_bridge.start()
+        try:
+            await asyncio.to_thread(configure_adb_reverse_once, speaker_port)
+        except Exception as error:
+            print(
+                "ADB/app startup check failed; audio servers remain active "
+                f"while USB recovery continues: {error}",
+                flush=True,
+            )
+
+        adb_monitor = threading.Thread(
+            target=monitor_adb_reverse,
+            args=(adb_monitor_stop, speaker_port),
+            name="adb-reverse-monitor",
+            daemon=True,
+        )
+        adb_monitor.start()
+        capture.start()
+
+        print(
+            f"Native phone speaker transport: tcp://{HOST}:{speaker_port}"
+        )
+        print(
+            f"Speaker port discovery: tcp://{HOST}:{SPEAKER_DISCOVERY_PORT}"
+        )
+        print(
+            "Speaker: PCM s16le / 48 kHz / "
+            "stereo / 10 ms native TCP"
+        )
+        print(
+            f"Speaker capture: {speaker_backend} "
+            "-> 10 ms TCP packets"
+        )
+        print(
+            "Phone microphone: PCM s16le / "
+            "48 kHz / mono / 10 ms chunks"
+        )
+
+        if IS_WINDOWS:
+            print(
+                "Phone -> PC: mic 48 kHz -> tcp:5002 -> "
+                "CABLE Input -> CABLE Output -> browser"
+            )
+        else:
+            print(
+                "Phone -> PC: mic 48 kHz -> tcp:5002 -> "
+                "PipeWire/Pulse source -> browser"
+            )
+
+        print(
+            "Open the Android app manually. "
+            "It discovers the speaker port and reconnects by itself."
+        )
+
+        async with speaker_server, discovery_server:
             await speaker_server.serve_forever()
     finally:
         adb_monitor_stop.set()
         capture.stop_event.set()
+        speaker_server.close()
+        discovery_server.close()
+        await speaker_server.wait_closed()
+        await discovery_server.wait_closed()
         await microphone_bridge.stop()
 
 

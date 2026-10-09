@@ -9,17 +9,21 @@ import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 
-/** Native PC -> phone PCM relay over adb reverse tcp/5001. */
+/** Native PC -> phone PCM relay over a dynamically discovered adb-reverse port. */
 public final class PhoneSpeakerBridge {
     private static final String TAG = "PhoneSpeakerBridge";
     private static final String HOST = "127.0.0.1";
-    private static final int PORT = 5001;
+    private static final int DISCOVERY_PORT = 5004;
+    private static final int DISCOVERY_CONNECT_TIMEOUT_MS = 1000;
+    private static final int DISCOVERY_READ_TIMEOUT_MS = 1000;
     private static final int SAMPLE_RATE = 48000;
     private static final int CHANNEL_CONFIG = AudioFormat.CHANNEL_OUT_STEREO;
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
@@ -49,6 +53,7 @@ public final class PhoneSpeakerBridge {
     private long lastBacklogLogAtMs;
     private long lastUnderflowReconnectAtMs;
     private long transportReconnectDelayMs = MIN_TRANSPORT_RECONNECT_DELAY_MS;
+    private int lastDiscoveredPort = -1;
 
     private static final class AudioTrackUnderflowException extends Exception {
         AudioTrackUnderflowException(int count) {
@@ -82,8 +87,14 @@ public final class PhoneSpeakerBridge {
             AudioTrack track = null;
             boolean underflowRecovery = false;
             boolean staleTransportRecovery = false;
+            boolean speakerTransportConnected = false;
             long connectionStartedAtMs = 0;
             try (Socket connected = new Socket()) {
+                int speakerPort = discoverSpeakerPort();
+                if (speakerPort != lastDiscoveredPort) {
+                    lastDiscoveredPort = speakerPort;
+                    Log.i(TAG, "Discovered speaker server port=" + speakerPort);
+                }
                 connected.setTcpNoDelay(true);
                 connected.setKeepAlive(true);
                 // ADB reverse can leave a half-open socket after USB drops.
@@ -92,13 +103,12 @@ public final class PhoneSpeakerBridge {
                 // forever on an obsolete connection.
                 connected.setSoTimeout(SOCKET_READ_TIMEOUT_MS);
                 connected.setReceiveBufferSize(MAX_SOCKET_BACKLOG_BYTES);
-                connected.connect(new InetSocketAddress(HOST, PORT), 4000);
+                connected.connect(new InetSocketAddress(HOST, speakerPort), 4000);
+                speakerTransportConnected = true;
                 connectionStartedAtMs = SystemClock.elapsedRealtime();
                 socket = connected;
 
                 // Authenticate the native speaker transport before PCM starts.
-                // This prevents the legacy WebView WebSocket client from sharing
-                // tcp/5001 with the native AudioTrack bridge.
                 DataOutputStream output = new DataOutputStream(connected.getOutputStream());
                 output.write(new byte[] { 'S', 'P', 'K', '1' });
                 output.flush();
@@ -116,7 +126,11 @@ public final class PhoneSpeakerBridge {
 
                 if (!running) break;
                 track.play();
-                Log.i(TAG, "Speaker connected; prebuffered=" + primed);
+                Log.i(
+                    TAG,
+                    "Speaker connected on tcp/" + speakerPort
+                        + "; prebuffered=" + primed
+                );
                 int lastUnderrunCount = readUnderrunCount(track);
                 int underflowsSinceConnection = 0;
 
@@ -138,11 +152,13 @@ public final class PhoneSpeakerBridge {
                     lastUnderrunCount = currentUnderrunCount;
                 }
             } catch (SocketTimeoutException error) {
-                staleTransportRecovery = true;
+                staleTransportRecovery = speakerTransportConnected;
                 if (running) {
                     Log.w(
                         TAG,
-                        "Speaker packet timeout; discarding stale playback and reconnecting"
+                        speakerTransportConnected
+                            ? "Speaker packet timeout; discarding stale playback and reconnecting"
+                            : "Speaker port discovery timed out; retrying"
                     );
                 }
             } catch (Throwable error) {
@@ -183,6 +199,40 @@ public final class PhoneSpeakerBridge {
             return track.getUnderrunCount();
         }
         return 0;
+    }
+
+    private int discoverSpeakerPort() throws Exception {
+        try (Socket discovery = new Socket()) {
+            discovery.setSoTimeout(DISCOVERY_READ_TIMEOUT_MS);
+            discovery.connect(
+                new InetSocketAddress(HOST, DISCOVERY_PORT),
+                DISCOVERY_CONNECT_TIMEOUT_MS
+            );
+
+            DataOutputStream request = new DataOutputStream(discovery.getOutputStream());
+            request.write("SPK?\n".getBytes(StandardCharsets.US_ASCII));
+            request.flush();
+
+            ByteArrayOutputStream response = new ByteArrayOutputStream();
+            DataInputStream input = new DataInputStream(discovery.getInputStream());
+            while (response.size() < 32) {
+                int value = input.read();
+                if (value < 0) break;
+                if (value == '\n') break;
+                if (value != '\r') response.write(value);
+            }
+
+            String[] fields = response.toString("US-ASCII").trim().split("\\s+");
+            if (fields.length != 2 || !"SPK1".equals(fields[0])) {
+                throw new IllegalStateException("Invalid speaker discovery response");
+            }
+
+            int port = Integer.parseInt(fields[1]);
+            if (port < 1 || port > 65535 || port == DISCOVERY_PORT) {
+                throw new IllegalStateException("Invalid speaker server port: " + port);
+            }
+            return port;
+        }
     }
 
     private AudioTrack createAudioTrack() {

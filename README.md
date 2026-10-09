@@ -7,7 +7,7 @@ Windows
 ───────
 áudio do PC
   → WASAPI loopback
-  → TCP :5001
+  → TCP em porta dinâmica descoberta pelo Android
   → AudioTrack Android 48 kHz stereo
 
 microfone Android 48 kHz mono
@@ -22,7 +22,7 @@ Linux
 ─────
 áudio do PC
   → monitor PipeWire/Pulse
-  → TCP :5001
+  → TCP em porta dinâmica descoberta pelo Android
   → AudioTrack Android 48 kHz stereo
 
 microfone Android 48 kHz mono
@@ -50,11 +50,12 @@ O Windows usa somente o VB-CABLE normal para o **microfone do celular**. Não é
 
 | Porta | Direção | Uso |
 |---|---|---|
-| `5001` | PC → Android | speaker, PCM16 stereo 48 kHz |
+| porta dinâmica | PC → Android | speaker, PCM16 stereo 48 kHz |
 | `5002` | Android → PC | mic, PCM16 mono 48 kHz |
 | `5003` | local no PC | status/gravação do bridge de microfone |
+| `5004` | PC → Android | descoberta da porta do speaker |
 
-O Android acessa `127.0.0.1:5001` e `127.0.0.1:5002`; `adb reverse` leva essas conexões ao processo Python no computador.
+O Android consulta `127.0.0.1:5004` para receber a porta atual do speaker e conecta a ela. O áudio do microfone continua em `127.0.0.1:5002`. `adb reverse` leva essas conexões ao processo Python no computador.
 
 ## Instalação rápida
 
@@ -67,7 +68,7 @@ O script [`scripts/setup_duplex.py`](scripts/setup_duplex.py):
 5. compila o APK;
 6. recupera o daemon ADB quando necessário;
 7. instala o APK com `--no-streaming`;
-8. configura `adb reverse` nas portas `5001` e `5002`.
+8. configura `adb reverse` para descoberta `5004` e microfone `5002`; o sender adiciona a porta dinâmica do speaker.
 
 O sender confere a versão do app Android antes de iniciar. Se o app estiver desatualizado ou não estiver instalado, execute `python .\scripts\setup_duplex.py` para compilar e instalar a versão compatível.
 
@@ -179,8 +180,8 @@ O sender configura `adb reverse` uma vez. Abra **Audio Phone Speaker** no celula
 Se quiser configurar manualmente:
 
 ```bash
-adb reverse tcp:5001 tcp:5001
 adb reverse tcp:5002 tcp:5002
+adb reverse tcp:5004 tcp:5004
 ```
 
 ## Arquitetura de áudio
@@ -192,11 +193,12 @@ adb reverse tcp:5002 tcp:5002
 - Windows: `PyAudioWPatch` + WASAPI loopback;
 - Linux: `SoundCard` + monitor PipeWire/Pulse.
 
-O capturador lê blocos de 10 ms e envia pacotes no mesmo ritmo. A fila no PC comporta até dois pacotes e o telefone mantém no máximo um pacote de backlog, descartando áudio antigo sob pressão em vez de aumentar a latência. Se o loopback WASAPI não entregar um bloco no prazo, o servidor envia um pacote PCM de silêncio para manter o relógio de reprodução; o áudio capturado volta assim que fica disponível. O bridge monitora o ADB e restaura as portas reversas depois que o USB reconecta. O servidor `tcp:5001` aceita somente o bridge Android nativo, identificado pelo handshake `SPK1`.
+O capturador lê blocos de 10 ms e envia pacotes no mesmo ritmo. A fila no PC comporta até quatro pacotes e o telefone mantém no máximo três pacotes de backlog, descartando áudio antigo sob pressão. Se o loopback WASAPI não entregar um bloco no prazo, o servidor envia silêncio para manter o relógio de reprodução. O bridge monitora o ADB e restaura as portas reversas depois que o USB reconecta. A porta TCP do speaker é escolhida pelo sistema; o Android descobre-a pelo endpoint `tcp:5004`. O servidor aceita somente o bridge nativo, identificado pelo handshake `SPK1`.
 
 No Android, `PhoneSpeakerBridge.java`:
 
-- conecta a `127.0.0.1:5001`;
+- consulta `127.0.0.1:5004` para descobrir a porta do speaker;
+- conecta à porta TCP anunciada pelo sender;
 - envia `SPK1`;
 - lê frames `length + PCM`;
 - reproduz em `AudioTrack`;
@@ -266,8 +268,8 @@ Instalação:
 
 ```bash
 adb install --no-streaming -r android/app/build/outputs/apk/debug/app-debug.apk
-adb reverse tcp:5001 tcp:5001
 adb reverse tcp:5002 tcp:5002
+adb reverse tcp:5004 tcp:5004
 ```
 
 ## Variáveis de ambiente
@@ -288,7 +290,7 @@ adb reverse tcp:5002 tcp:5002
 
 ```text
 audio_sender.py
-  captura o áudio do PC e serve tcp:5001
+  captura o áudio do PC, anuncia uma porta dinâmica e serve o speaker
 
 phone_microphone_bridge.py
   recebe tcp:5002 e controla o mic virtual
