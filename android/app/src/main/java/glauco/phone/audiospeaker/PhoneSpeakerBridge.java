@@ -6,6 +6,7 @@ import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.os.Build;
 import android.os.Process;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.DataInputStream;
@@ -22,6 +23,11 @@ public final class PhoneSpeakerBridge {
     private static final int CHANNEL_CONFIG = AudioFormat.CHANNEL_OUT_STEREO;
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
     private static final int BYTES_PER_FRAME = 4;
+    private static final int FRAME_HEADER_BYTES = 4;
+    private static final int FRAME_DURATION_MS = 20;
+    private static final int MAX_SOCKET_BACKLOG_FRAMES = 4;
+    private static final int MAX_SOCKET_BACKLOG_BYTES = MAX_SOCKET_BACKLOG_FRAMES
+        * (FRAME_HEADER_BYTES + SAMPLE_RATE * BYTES_PER_FRAME * FRAME_DURATION_MS / 1000);
     // Low-latency playback: 40 ms initial prime, ~80 ms track target.
     private static final int START_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 40 / 1000;
     private static final int TARGET_TRACK_BUFFER_BYTES = SAMPLE_RATE * BYTES_PER_FRAME * 80 / 1000;
@@ -30,6 +36,7 @@ public final class PhoneSpeakerBridge {
     private volatile Socket socket;
     private volatile AudioTrack audioTrack;
     private Thread connectionThread;
+    private long lastBacklogLogAtMs;
 
     public synchronized void start() {
         if (running) return;
@@ -58,7 +65,7 @@ public final class PhoneSpeakerBridge {
             try (Socket connected = new Socket()) {
                 connected.setTcpNoDelay(true);
                 connected.setKeepAlive(true);
-                connected.setReceiveBufferSize(256 * 1024);
+                connected.setReceiveBufferSize(MAX_SOCKET_BACKLOG_BYTES);
                 connected.connect(new InetSocketAddress(HOST, PORT), 4000);
                 socket = connected;
 
@@ -85,7 +92,7 @@ public final class PhoneSpeakerBridge {
                 Log.i(TAG, "Speaker connected; prebuffered=" + primed);
 
                 while (running && !connected.isClosed()) {
-                    writeFully(track, readFrame(input));
+                    writeFully(track, readFreshFrame(input));
                 }
             } catch (Throwable error) {
                 if (running) Log.e(TAG, "Speaker transport failure; reconnecting", error);
@@ -142,6 +149,31 @@ public final class PhoneSpeakerBridge {
         byte[] payload = new byte[length];
         input.readFully(payload);
         return payload;
+    }
+
+    private byte[] readFreshFrame(DataInputStream input) throws Exception {
+        byte[] pcm = readFrame(input);
+        int queuedBytes = input.available();
+        int droppedFrames = 0;
+
+        while (queuedBytes > MAX_SOCKET_BACKLOG_BYTES) {
+            pcm = readFrame(input);
+            droppedFrames++;
+            queuedBytes = input.available();
+        }
+
+        long now = SystemClock.elapsedRealtime();
+        if (droppedFrames > 0 && now - lastBacklogLogAtMs >= 1000) {
+            lastBacklogLogAtMs = now;
+            Log.w(
+                TAG,
+                "Buffer guard dropped " + droppedFrames
+                    + " stale frames; queuedBytes=" + queuedBytes
+                    + ", limitBytes=" + MAX_SOCKET_BACKLOG_BYTES
+            );
+        }
+
+        return pcm;
     }
 
     private void writeFully(AudioTrack track, byte[] pcm) {
