@@ -13,6 +13,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 
 /** Native PC -> phone PCM relay over adb reverse tcp/5001. */
 public final class PhoneSpeakerBridge {
@@ -25,11 +26,12 @@ public final class PhoneSpeakerBridge {
     private static final int BYTES_PER_FRAME = 4;
     private static final int FRAME_HEADER_BYTES = 4;
     private static final int FRAME_DURATION_MS = 10;
+    private static final int SOCKET_READ_TIMEOUT_MS = 100;
     private static final int MAX_SOCKET_BACKLOG_FRAMES = 1;
     private static final int MAX_SOCKET_BACKLOG_BYTES = MAX_SOCKET_BACKLOG_FRAMES
         * (FRAME_HEADER_BYTES + SAMPLE_RATE * BYTES_PER_FRAME * FRAME_DURATION_MS / 1000);
-    private static final int UNDERFLOWS_BEFORE_RECONNECT = 5;
-    private static final long UNDERFLOW_RECONNECT_COOLDOWN_MS = 5000;
+    private static final int UNDERFLOWS_BEFORE_RECONNECT = 1;
+    private static final long UNDERFLOW_RECONNECT_COOLDOWN_MS = 1000;
     private static final long MIN_TRANSPORT_RECONNECT_DELAY_MS = 250;
     private static final long MAX_TRANSPORT_RECONNECT_DELAY_MS = 2000;
     // Prime enough audio to cover Android's minimum AudioTrack buffer before play().
@@ -76,10 +78,16 @@ public final class PhoneSpeakerBridge {
         while (running) {
             AudioTrack track = null;
             boolean underflowRecovery = false;
+            boolean staleTransportRecovery = false;
             long connectionStartedAtMs = 0;
             try (Socket connected = new Socket()) {
                 connected.setTcpNoDelay(true);
                 connected.setKeepAlive(true);
+                // ADB reverse can leave a half-open socket after USB drops.
+                // Bound every packet read so stale playback is flushed and
+                // the bridge reconnects to the latest PCM instead of waiting
+                // forever on an obsolete connection.
+                connected.setSoTimeout(SOCKET_READ_TIMEOUT_MS);
                 connected.setReceiveBufferSize(MAX_SOCKET_BACKLOG_BYTES);
                 connected.connect(new InetSocketAddress(HOST, PORT), 4000);
                 connectionStartedAtMs = SystemClock.elapsedRealtime();
@@ -126,6 +134,14 @@ public final class PhoneSpeakerBridge {
                     }
                     lastUnderrunCount = currentUnderrunCount;
                 }
+            } catch (SocketTimeoutException error) {
+                staleTransportRecovery = true;
+                if (running) {
+                    Log.w(
+                        TAG,
+                        "Speaker packet timeout; discarding stale playback and reconnecting"
+                    );
+                }
             } catch (Throwable error) {
                 underflowRecovery = underflowRecovery
                     || error instanceof AudioTrackUnderflowException;
@@ -141,7 +157,7 @@ public final class PhoneSpeakerBridge {
 
             if (running) {
                 long reconnectDelayMs = 100;
-                if (!underflowRecovery) {
+                if (!underflowRecovery && !staleTransportRecovery) {
                     long now = SystemClock.elapsedRealtime();
                     if (connectionStartedAtMs > 0
                         && now - connectionStartedAtMs >= 10000) {
