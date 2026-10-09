@@ -27,7 +27,10 @@ public final class PhoneSpeakerBridge {
     private static final int FRAME_HEADER_BYTES = 4;
     private static final int FRAME_DURATION_MS = 10;
     private static final int SOCKET_READ_TIMEOUT_MS = 100;
-    private static final int MAX_SOCKET_BACKLOG_FRAMES = 1;
+    // ADB/TCP can deliver adjacent 10 ms writes together after a short
+    // scheduling pause. Allow 30 ms of burst before dropping old audio;
+    // a one-frame limit discarded valid PCM and made playback crackle.
+    private static final int MAX_SOCKET_BACKLOG_FRAMES = 3;
     private static final int MAX_SOCKET_BACKLOG_BYTES = MAX_SOCKET_BACKLOG_FRAMES
         * (FRAME_HEADER_BYTES + SAMPLE_RATE * BYTES_PER_FRAME * FRAME_DURATION_MS / 1000);
     private static final int UNDERFLOWS_BEFORE_RECONNECT = 1;

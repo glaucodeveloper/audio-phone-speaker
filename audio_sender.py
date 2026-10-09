@@ -27,7 +27,8 @@ SAMPLE_WIDTH = 2
 CHUNK_FRAMES = 480       # 10 ms transport packet
 CAPTURE_FRAMES = 480     # 10 ms capture block keeps transport packets evenly paced
 CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * SAMPLE_WIDTH
-QUEUE_MAX = 2            # cap PC-side audio backlog at ~20 ms
+SPEAKER_FRAME_INTERVAL_SECONDS = CHUNK_FRAMES / SAMPLE_RATE
+QUEUE_MAX = 4            # absorb brief WASAPI jitter; cap backlog at ~40 ms
 ADB_REVERSE_MONITOR_INTERVAL_SECONDS = 2.0
 
 IS_WINDOWS = sys.platform == "win32"
@@ -765,11 +766,27 @@ async def handle_speaker(
         peer,
     )
 
+    loop = asyncio.get_running_loop()
+    next_frame_at = loop.time()
     try:
         while True:
             chunk = await capture.get_next_chunk(writer)
             if chunk is None:
                 break
+
+            # WASAPI can return several captured blocks together after a
+            # scheduler pause. Keep the TCP stream at the 10 ms PCM cadence
+            # instead of flushing that burst into Android's tiny low-latency
+            # AudioTrack buffer.
+            delay = next_frame_at - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            now = loop.time()
+            if now - next_frame_at > 0.030:
+                # Do not catch up by sending a burst after a real stall. The
+                # capture queue already retains only the newest audio.
+                next_frame_at = now
 
             now = time.monotonic()
             if now - last_speaker_queue_report_at >= 5.0:
@@ -793,6 +810,7 @@ async def handle_speaker(
                 + chunk
             )
             await writer.drain()
+            next_frame_at += SPEAKER_FRAME_INTERVAL_SECONDS
 
     except (
         ConnectionError,
